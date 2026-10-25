@@ -1,0 +1,771 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RSPdx Web Receiver</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23101820'/%3E%3Cpath d='M4 22 Q10 6 16 16 T28 10' stroke='%2338bdf8' stroke-width='3' fill='none'/%3E%3C/svg%3E">
+<style>
+:root {
+  --bg: #f4f6f8; --panel: #ffffff; --line: #d8dee4; --text: #18212b; --muted: #5b6875;
+  --accent: #0b74c4; --accent-soft: #e2f0fb; --ok: #1a7f37; --warn: #b35900; --bad: #c62828;
+  --mark: rgba(11, 116, 196, .22); --mark-line: #0b74c4;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0d1117; --panel: #151b23; --line: #2a3340; --text: #e6edf3; --muted: #8b98a5;
+    --accent: #38bdf8; --accent-soft: #0f2a3a; --ok: #3fb950; --warn: #f0a33a; --bad: #f47067;
+    --mark: rgba(56, 189, 248, .22); --mark-line: #38bdf8;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0d1117; --panel: #151b23; --line: #2a3340; --text: #e6edf3; --muted: #8b98a5;
+  --accent: #38bdf8; --accent-soft: #0f2a3a; --ok: #3fb950; --warn: #f0a33a; --bad: #f47067;
+  --mark: rgba(56, 189, 248, .22); --mark-line: #38bdf8;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
+h1 { font-size: 16px; margin: 0; font-weight: 650; }
+.status { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--warn); }
+.dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); }
+.spacer { flex: 1; }
+main { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 12px; padding: 12px 16px; }
+@media (max-width: 900px) { main { grid-template-columns: minmax(0, 1fr); } }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.row + .row { margin-top: 8px; }
+button, input, select { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 7px; padding: 5px 10px; }
+button { cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.big { padding: 7px 14px; font-weight: 600; }
+.seg { display: inline-flex; }
+.seg button { border-radius: 0; margin-left: -1px; }
+.seg button:first-child { border-radius: 7px 0 0 7px; margin-left: 0; }
+.seg button:last-child { border-radius: 0 7px 7px 0; }
+.freq { font: 600 26px/1 ui-monospace, "SF Mono", Menlo, Consolas, monospace; letter-spacing: .5px; min-width: 190px; }
+.freq small { font-size: 14px; color: var(--muted); font-weight: 500; }
+label { color: var(--muted); font-size: 13px; }
+.scope { position: relative; margin-top: 10px; user-select: none; }
+canvas { display: block; width: 100%; }
+#spec { height: 130px; border-radius: 8px 8px 0 0; background: var(--bg); }
+#wf { height: 380px; border-radius: 0 0 8px 8px; background: #000; cursor: crosshair; }
+#axis { height: 20px; }
+#hover { position: absolute; pointer-events: none; font: 12px ui-monospace, monospace; background: var(--panel); border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; display: none; }
+h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin: 4px 0 8px; font-weight: 600; }
+.chan { display: grid; grid-template-columns: 88px 38px 1fr 50px; gap: 8px; align-items: center; padding: 5px 6px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+.chan:hover { background: var(--accent-soft); }
+.chan.cur { outline: 1px solid var(--accent); background: var(--accent-soft); }
+.chan .f { font-family: ui-monospace, monospace; font-weight: 600; }
+.chan .m { color: var(--muted); text-transform: uppercase; font-size: 11px; }
+.bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--accent); }
+.ago { text-align: right; color: var(--muted); font-size: 12px; }
+.live { color: var(--ok); font-weight: 600; }
+#meter { width: 120px; height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; }
+#meter i { display: block; height: 100%; width: 0; background: var(--ok); transition: width .1s; }
+.hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
+.empty { color: var(--muted); font-size: 13px; padding: 6px; }
+#chanlist { max-height: 560px; overflow-y: auto; }
+.wide { grid-column: 1 / -1; }
+.trhead { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.trhead h2 { margin: 0; }
+.txch { display: flex; gap: 6px; flex-wrap: wrap; }
+.pill { font: 12px ui-monospace, monospace; padding: 2px 7px; border-radius: 10px; border: 1px solid var(--line); color: var(--muted); cursor: pointer; }
+.pill.talk { border-color: var(--ok); color: var(--ok); font-weight: 600; }
+#trlist { max-height: 420px; overflow-y: auto; }
+.tr { display: grid; grid-template-columns: 70px 84px 34px 26px 30px minmax(0, 1fr); gap: 8px; align-items: baseline; padding: 6px 4px; border-top: 1px solid var(--line); font-size: 13px; }
+.tr .t { color: var(--muted); font-family: ui-monospace, monospace; font-size: 12px; }
+.tr .f { font-family: ui-monospace, monospace; font-weight: 600; cursor: pointer; color: var(--accent); }
+.tr .m, .tr .l { color: var(--muted); text-transform: uppercase; font-size: 11px; }
+.tr .x { overflow-wrap: anywhere; }
+.tr.unclear .x { color: var(--muted); font-style: italic; }
+.tr button { padding: 0 6px; font-size: 12px; }
+#wfo { position: absolute; left: 0; top: 130px; width: 100%; height: 380px; pointer-events: none; }
+.fgrid { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 12px; margin-top: 8px; }
+@media (max-width: 900px) { .fgrid { grid-template-columns: minmax(0, 1fr); } }
+.tlwrap { position: relative; max-height: 520px; overflow-y: auto; border: 1px solid var(--line); border-radius: 8px; }
+#tl { display: block; width: 100%; cursor: pointer; }
+#tltip { position: absolute; display: none; pointer-events: none; max-width: 320px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 4px 7px; font-size: 12px; box-shadow: 0 2px 8px rgba(0,0,0,.15); }
+.thread { border: 1px solid var(--line); border-radius: 8px; display: flex; flex-direction: column; min-height: 300px; }
+.thhead { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+.thhead b { font-family: ui-monospace, monospace; font-size: 15px; margin-right: auto; }
+#thlist { overflow-y: auto; max-height: 470px; padding: 6px 10px; }
+.msg { display: grid; grid-template-columns: 62px 26px minmax(0, 1fr); gap: 8px; align-items: baseline; padding: 5px 6px; border-radius: 6px; font-size: 13px; }
+.msg .t { color: var(--muted); font: 12px ui-monospace, monospace; }
+.msg.unclear .x { color: var(--muted); font-style: italic; }
+.msg.playing { background: var(--accent-soft); outline: 1px solid var(--accent); }
+.msg.gap { border-top: 1px dashed var(--line); margin-top: 6px; padding-top: 9px; }
+.msg button { padding: 0 6px; font-size: 12px; }
+.call { display: inline-block; font: 600 11px ui-monospace, monospace; padding: 0 5px; margin-left: 5px; border-radius: 4px; background: var(--accent-soft); color: var(--accent); border: 1px solid var(--accent); vertical-align: 1px; cursor: pointer; }
+.call.new { border-style: dashed; background: transparent; color: var(--muted); border-color: var(--muted); }
+.call.fixed { border-color: var(--warn); color: var(--warn); background: transparent; }
+#thcalls { padding: 6px 10px 0; display: flex; flex-wrap: wrap; gap: 4px; }
+#thcalls .call { margin-left: 0; }
+#thcalls .n { font-weight: 400; opacity: .7; }
+.sstvlive { display: flex; gap: 12px; flex-wrap: wrap; margin: 6px 0 10px; }
+.sstvlive .rx { border: 1px solid var(--ok); border-radius: 8px; padding: 6px; font-size: 12px; }
+.sstvlive img { display: block; width: 240px; max-width: 100%; image-rendering: auto; border-radius: 4px; background: #000; }
+.gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; }
+.gallery a { display: block; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; color: var(--text); text-decoration: none; background: var(--bg); }
+.gallery img { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: cover; background: #000; }
+.gallery span { display: block; padding: 4px 6px; font: 11px ui-monospace, monospace; color: var(--muted); }
+@media (max-width: 600px) { .tr { grid-template-columns: 60px 76px 30px 26px 1fr; } .tr .l { display: none; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>RSPdx Web Receiver</h1>
+  <div class="status"><span class="dot" id="dot"></span><span id="status">connecting</span></div>
+  <div class="spacer"></div>
+  <div class="seg" id="bands"></div>
+  <input id="center" size="9" title="Center frequency in MHz" placeholder="MHz">
+  <select id="span" title="Receive bandwidth (span) and sample rate"></select>
+  <select id="lna" title="LNA state: 0 = most RF gain. With a strong antenna, a higher state prevents overload"></select>
+  <button id="theme" title="Light or dark theme">◐</button>
+</header>
+<main>
+  <section class="card">
+    <div class="row">
+      <button class="big" id="play">▶ Start audio</button>
+      <div class="freq" id="freq">—</div>
+      <div class="seg" id="modes"></div>
+      <div class="seg">
+        <button data-step="-1000">−1k</button><button data-step="-100">−100</button><button data-step="-10">−10</button>
+        <button data-step="10">+10</button><button data-step="100">+100</button><button data-step="1000">+1k</button>
+      </div>
+      <button id="auto" title="Follow the most active voice channel">Auto</button>
+    </div>
+    <div class="row">
+      <label for="vol">Volume</label><input type="range" id="vol" min="0" max="2" step="0.05" value="1">
+      <div id="meter"><i></i></div>
+      <button id="rec">● Record</button>
+      <span class="hint" id="info"></span>
+    </div>
+    <div class="scope" id="scope">
+      <canvas id="spec"></canvas>
+      <canvas id="wf"></canvas>
+      <canvas id="wfo"></canvas>
+      <canvas id="axis"></canvas>
+      <div id="hover"></div>
+    </div>
+    <div class="hint">Click the waterfall to tune. In SSB, click the middle of the signal: the receiver then finds the carrier in about 5 s. Use the mouse wheel or the ±10 buttons to correct the pitch by ear. The 200 kHz grid of strong lines is local interference.</div>
+  </section>
+  <aside class="card">
+    <h2>Active channels</h2>
+    <div id="chanlist"><div class="empty">Waiting for 3 s of data…</div></div>
+    <div class="hint">Channels with voice activity in the last 10 s. The list keeps them for 10 minutes. Click a channel to listen.</div>
+  </aside>
+  <section class="card wide">
+    <div class="trhead">
+      <h2>Transcripts</h2>
+      <div class="seg"><button id="tabFeed">Feed</button><button id="tabFreq">By frequency</button></div>
+      <button id="trtoggle">Transcribe</button>
+      <label><input type="checkbox" id="unclear"> Show unclear segments</label>
+      <span class="hint" id="trstatus" style="margin:0"></span>
+    </div>
+    <div class="txch" id="txch"></div>
+    <div id="feedView">
+      <div id="trlist"><div class="empty">No transcripts yet.</div></div>
+    </div>
+    <div id="freqView" hidden>
+      <div class="row" style="margin-top:8px">
+        <label for="tlwin">Show the last</label>
+        <select id="tlwin"><option value="10">10 min</option><option value="30" selected>30 min</option><option value="60">60 min</option><option value="180">3 h</option><option value="720">12 h</option></select>
+        <span class="hint" style="margin:0">One row for each frequency. Click a row to open its conversation. Click a block to play it.</span>
+      </div>
+      <div class="fgrid">
+        <div class="tlwrap" id="tlwrap"><canvas id="tl"></canvas><div id="tltip"></div></div>
+        <div class="thread">
+          <div class="thhead">
+            <b id="thf">Select a frequency</b>
+            <button id="thlisten" title="Tune the receiver to this frequency">Listen live</button>
+            <button id="thplay" title="Play the conversation in time order">▶ Play all</button>
+            <label title="Scroll to new messages, and continue Play all with them"><input type="checkbox" id="thfollow" checked> Follow</label>
+            <span id="thfix" hidden><span class="hint" id="thdelta" style="margin:0"></span>
+              <button id="thapply" title="Move this frequency to the tuned frequency, also for its saved segments, and transcribe them again">Apply to this frequency</button></span>
+          </div>
+          <div id="thcalls"></div>
+          <div id="thlist"><div class="empty">Click a row of the timeline.</div></div>
+        </div>
+      </div>
+    </div>
+    <div class="hint">Whisper transcribes the voice of all active channels, plus the tuned channel. Radio voice is noisy, so the text can be wrong. Click ▶ to hear a segment, or click a frequency to tune to it.</div>
+  </section>
+  <section class="card wide">
+    <div class="trhead"><h2>SSTV images</h2><span class="hint" id="sstvstat" style="margin:0"></span></div>
+    <div class="sstvlive" id="sstvlive"></div>
+    <div class="gallery" id="gallery"><div class="empty">No images yet. SSTV is on 14.230, 14.233, 7.165, 7.171, 3.730, 3.735, 21.340 and 28.680 MHz.</div></div>
+  </section>
+</main>
+<script>
+// the voice (SSB) part of each band, IARU region 1; 41m is broadcast AM and 11m is CB
+const BANDS = [["80m", 3.6e6, 3.8e6], ["40m", 7.06e6, 7.2e6], ["41m", 7.2e6, 7.45e6], ["20m", 14.1e6, 14.35e6],
+               ["17m", 18.111e6, 18.168e6], ["15m", 21.151e6, 21.45e6], ["12m", 24.931e6, 24.99e6],
+               ["11m", 26.965e6, 27.405e6], ["10m", 28.32e6, 29.0e6]];
+function bandCenter(lo, hi) {
+  // the receiver has no spike at its center frequency, so the band goes in the middle of the view
+  return Math.round(((lo + hi) / 2) / 1e3) * 1e3;
+}
+const MODES = ["lsb", "usb", "am", "cw", "nfm"];
+let S = null, chans = [], current = [], lastNow = 0;
+const $ = id => document.getElementById(id);
+
+// theme
+try { const t = localStorage.getItem("websdr-theme"); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
+$("theme").onclick = () => {
+  const dark = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim() === "#0d1117";
+  const t = dark ? "light" : "dark";
+  document.documentElement.dataset.theme = t;
+  try { localStorage.setItem("websdr-theme", t); } catch (e) {}
+};
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+
+function api(q) { return fetch("/api/set?" + new URLSearchParams(q)).then(r => r.json()).then(s => { S = s; drawState(); }); }
+
+for (const [name, lo, hi] of BANDS) {
+  const b = document.createElement("button"); b.textContent = name; b.dataset.lo = lo; b.dataset.hi = hi;
+  b.onclick = () => api({ center: bandCenter(lo, hi) }); $("bands").append(b);
+}
+$("span").onchange = e => api({ rate: e.target.value });
+$("lna").innerHTML = [...Array(10).keys()].map(n => `<option value="${n}">LNA ${n}${n === 0 ? " (max gain)" : ""}</option>`).join("");
+$("lna").onchange = e => api({ lna: e.target.value });
+for (const m of MODES) {
+  const b = document.createElement("button"); b.textContent = m.toUpperCase(); b.dataset.mode = m;
+  b.onclick = () => api({ mode: m }); $("modes").append(b);
+}
+document.querySelectorAll("[data-step]").forEach(b => b.onclick = () => S && api({ tune: S.tune + +b.dataset.step, mode: S.mode }));
+$("auto").onclick = () => S && api({ auto: S.auto ? 0 : 1 });
+$("center").onchange = e => { const v = parseFloat(e.target.value); if (v > 0) api({ center: v * 1e6 }); };
+
+function fmt(f) { return (f / 1e3).toFixed(2); }
+function mhz(f) { return f >= 1e6 ? `${(f / 1e6).toFixed(2)} MHz` : `${Math.round(f / 1e3)} kHz`; }
+let lastView = "";
+function drawState() {
+  if (!S) return;
+  $("freq").innerHTML = `${fmt(S.tune)} <small>kHz${S.refine > 0 ? " · fine tuning" : ""}</small>`;
+  document.querySelectorAll("#modes button").forEach(b => b.classList.toggle("on", b.dataset.mode === S.mode));
+  const vlo = S.center - S.span / 2, vhi = S.center + S.span / 2;
+  document.querySelectorAll("#bands button").forEach(b => b.classList.toggle("on", +b.dataset.lo >= vlo && +b.dataset.hi <= vhi));
+  const sel = $("span");
+  if (sel.options.length !== S.spans.length) {
+    sel.innerHTML = S.spans.map(o => `<option value="${o.rate}">Span ${mhz(o.span)} (${o.rate / 1e6} MS/s)</option>`).join("");
+  }
+  sel.value = S.rate;
+  $("lna").value = S.lna;
+  const view = `${S.center}|${S.rate}`;
+  if (view !== lastView) { lastView = view; wctx.fillStyle = "#000"; wctx.fillRect(0, 0, wf.width, wf.height); }
+  $("auto").classList.toggle("on", S.auto);
+  if (document.activeElement !== $("center")) $("center").value = (S.center / 1e6).toFixed(3);
+  const ok = S.status === "running";
+  $("dot").className = "dot " + (ok ? "ok" : "bad");
+  $("status").textContent = ok ? `${S.antenna}, ${(S.center / 1e6).toFixed(3)} MHz, span ${mhz(S.span)}` : S.status;
+  drawAxis(); renderChans(); drawOverlay(); drawFix();
+}
+
+// waterfall and spectrum
+const wf = $("wf"), spec = $("spec"), axis = $("axis");
+const wctx = wf.getContext("2d"), sctx = spec.getContext("2d"), actx = axis.getContext("2d");
+const wfo = $("wfo"), octx = wfo.getContext("2d");
+let W = 1600, lastLine = null, txInfo = null;
+const cmap = (() => {
+  const stops = [[0, 0, 0, 0], [0.25, 0, 30, 110], [0.5, 0, 160, 200], [0.7, 240, 220, 40], [0.88, 255, 90, 0], [1, 255, 255, 255]];
+  const out = new Uint8ClampedArray(256 * 3);
+  for (let i = 0; i < 256; i++) {
+    const t = i / 255; let k = 0; while (stops[k + 1][0] < t) k++;
+    const [t0, ...a] = stops[k], [t1, ...b] = stops[k + 1], u = (t - t0) / (t1 - t0);
+    for (let c = 0; c < 3; c++) out[i * 3 + c] = a[c] + (b[c] - a[c]) * u;
+  }
+  return out;
+})();
+function sizeCanvases() {
+  // a change of the canvas size clears it, so change only what is different
+  const dpr = window.devicePixelRatio || 1;
+  const set = (c, w, h) => { if (c.width !== w || c.height !== h) { c.width = w; c.height = h; } };
+  set(wf, W, 380);
+  set(spec, Math.round(spec.clientWidth * dpr), Math.round(130 * dpr));
+  set(axis, Math.round(axis.clientWidth * dpr), Math.round(20 * dpr));
+  set(wfo, Math.round(wfo.clientWidth * dpr), Math.round(380 * dpr));
+  drawAxis(); drawSpec(); drawOverlay();
+}
+const xToF = x => S.center - S.span / 2 + x * S.span;          // x in 0..1
+const fToX = f => (f - (S.center - S.span / 2)) / S.span;
+function passband() {
+  const b = { usb: [200, 2900], lsb: [-2900, -200], cw: [450, 950], am: [-4000, 4000], nfm: [-3500, 3500] }[S.mode];
+  return [S.tune + b[0], S.tune + b[1]];
+}
+function drawLine(q) {
+  if (q.length !== W) { W = q.length; sizeCanvases(); }
+  wctx.drawImage(wf, 0, 0, W, wf.height - 1, 0, 1, W, wf.height - 1);
+  const img = wctx.createImageData(W, 1);
+  for (let i = 0; i < W; i++) { const v = q[i]; img.data.set([cmap[v * 3], cmap[v * 3 + 1], cmap[v * 3 + 2], 255], i * 4); }
+  wctx.putImageData(img, 0, 0);
+  lastLine = q; drawSpec();
+}
+function drawSpec() {
+  if (!S || !lastLine) return;
+  const w = spec.width, h = spec.height;
+  sctx.clearRect(0, 0, w, h);
+  const [a, b] = passband();
+  sctx.fillStyle = css("--mark"); sctx.fillRect(fToX(a) * w, 0, Math.max(2, (fToX(b) - fToX(a)) * w), h);
+  sctx.strokeStyle = css("--line"); sctx.lineWidth = 1;
+  for (let d = 0; d <= 4; d++) { const y = h - d * h / 4; sctx.beginPath(); sctx.moveTo(0, y); sctx.lineTo(w, y); sctx.stroke(); }
+  sctx.strokeStyle = css("--accent"); sctx.lineWidth = 1.5 * (window.devicePixelRatio || 1); sctx.beginPath();
+  for (let i = 0; i < W; i++) { const x = i / W * w, y = h - lastLine[i] / 255 * h; i ? sctx.lineTo(x, y) : sctx.moveTo(x, y); }
+  sctx.stroke();
+  sctx.strokeStyle = css("--mark-line"); sctx.beginPath(); const xt = fToX(S.tune) * w; sctx.moveTo(xt, 0); sctx.lineTo(xt, h); sctx.stroke();
+  const dpr = window.devicePixelRatio || 1;
+  // detected channels: full-height bands, green when live, grey when heard in the last minute
+  let labelEnd = -1e9;
+  sctx.font = `${10 * dpr}px ui-monospace, monospace`; sctx.textBaseline = "bottom";
+  for (const c of [...chans].sort((x, y) => x.f - y.f)) {
+    const age = lastNow - c.last; if (age > 60) continue;
+    const [p, q] = chanBand(c), x1 = fToX(p) * w, x2 = Math.max(x1 + 3 * dpr, fToX(q) * w);
+    sctx.fillStyle = css(age < 5 ? "--ok" : "--muted");
+    sctx.globalAlpha = age < 5 ? 0.3 : 0.15; sctx.fillRect(x1, 0, x2 - x1, h);
+    sctx.globalAlpha = age < 5 ? 1 : 0.6; sctx.fillRect(x1, h - 6 * dpr, x2 - x1, 6 * dpr);
+    const label = khz(c.f), tw = sctx.measureText(label).width, lx = (x1 + x2) / 2 - tw / 2;
+    if (lx > labelEnd + 4 * dpr) { sctx.fillText(label, lx, h - 7 * dpr); labelEnd = lx + tw; }
+  }
+  sctx.globalAlpha = 1; sctx.textBaseline = "alphabetic";
+  // channels that are transcribed: green when they talk
+  if (txInfo && txInfo.on) for (const c of txInfo.channels) {
+    const x = fToX(c.f) * w; sctx.fillStyle = c.talking ? css("--ok") : css("--muted");
+    sctx.beginPath(); sctx.moveTo(x - 4 * dpr, 0); sctx.lineTo(x + 4 * dpr, 0); sctx.lineTo(x, 7 * dpr); sctx.fill();
+  }
+  // receive bandwidth and channel bandwidth
+  sctx.font = `${11 * dpr}px ui-monospace, monospace`; sctx.textBaseline = "top";
+  const label = `span ${mhz(S.span)} · IF filter ${mhz(S.bw)} · ${S.rate / 1e6} MS/s · ${(S.span / W).toFixed(0)} Hz/px`;
+  const tw = sctx.measureText(label).width;
+  sctx.fillStyle = css("--panel"); sctx.globalAlpha = 0.85; sctx.fillRect(4 * dpr, 4 * dpr, tw + 10 * dpr, 16 * dpr); sctx.globalAlpha = 1;
+  sctx.fillStyle = css("--muted"); sctx.fillText(label, 9 * dpr, 7 * dpr);
+  const pb = `${S.mode.toUpperCase()} ${((b - a) / 1e3).toFixed(1)} kHz`;
+  sctx.fillStyle = css("--mark-line"); sctx.textAlign = xt > w - 120 * dpr ? "right" : "left";
+  sctx.fillText(pb, xt + (sctx.textAlign === "right" ? -6 : 6) * dpr, 24 * dpr); sctx.textAlign = "left";
+}
+function drawAxis() {
+  if (!S) return;
+  const w = axis.width, h = axis.height, dpr = window.devicePixelRatio || 1;
+  actx.clearRect(0, 0, w, h); actx.fillStyle = css("--muted"); actx.strokeStyle = css("--muted");
+  actx.font = `${11 * dpr}px ui-monospace, monospace`; actx.textAlign = "center";
+  // a round step that gives about one label for each 90 px
+  const raw = S.span / Math.max(1, w / dpr / 90), mag = 10 ** Math.floor(Math.log10(raw));
+  const step = [1, 2, 5, 10].map(k => k * mag).find(s => s >= raw);
+  const dec = Math.max(0, Math.min(4, Math.ceil(-Math.log10(step / 1e6))));
+  for (let f = Math.ceil((S.center - S.span / 2) / step) * step; f <= S.center + S.span / 2; f += step) {
+    const x = fToX(f) * w; actx.beginPath(); actx.moveTo(x, 0); actx.lineTo(x, 4 * dpr); actx.stroke();
+    actx.fillText((f / 1e6).toFixed(dec), x, 16 * dpr);
+  }
+}
+function chanBand(c) { return c.mode === "lsb" ? [c.f - 2900, c.f - 200] : [c.f + 200, c.f + 2900]; }
+const khz = f => f % 1000 === 0 ? String(f / 1000) : (f / 1e3).toFixed(2);
+function drawOverlay() {
+  // the detected channels over the waterfall: filled when live, outlined when heard in the last minute
+  if (!S) return;
+  const w = wfo.width, h = wfo.height, dpr = window.devicePixelRatio || 1;
+  octx.clearRect(0, 0, w, h);
+  const list = chans.filter(c => lastNow - c.last < 60).sort((a, b) => a.f - b.f);
+  octx.font = `${10 * dpr}px ui-monospace, monospace`; octx.textBaseline = "top";
+  let labelEnd = -1e9;
+  for (const c of list) {
+    const live = lastNow - c.last < 5, [p, q] = chanBand(c);
+    const x1 = fToX(p) * w, x2 = Math.max(x1 + 2 * dpr, fToX(q) * w);
+    const cur = S && Math.abs(c.f - S.tune) < 1500;
+    octx.fillStyle = css(cur ? "--accent" : "--ok");
+    octx.globalAlpha = live ? 0.28 : 0.1; octx.fillRect(x1, 0, x2 - x1, h);
+    octx.globalAlpha = live ? 0.9 : 0.45; octx.strokeStyle = octx.fillStyle; octx.lineWidth = dpr;
+    octx.strokeRect(x1, 0, x2 - x1, h);
+    const label = khz(c.f), tw = octx.measureText(label).width + 6 * dpr, lx = (x1 + x2) / 2 - tw / 2;
+    if (lx > labelEnd + 3 * dpr) {
+      octx.globalAlpha = live ? 0.95 : 0.6; octx.fillStyle = "#000"; octx.fillRect(lx, 2 * dpr, tw, 13 * dpr);
+      octx.fillStyle = live ? "#7ee787" : "#aab4be"; octx.fillText(label, lx + 3 * dpr, 4 * dpr);
+      labelEnd = lx + tw;
+    }
+  }
+  octx.globalAlpha = 1;
+}
+function chanAt(f) {
+  return chans.filter(c => lastNow - c.last < 60).find(c => { const [p, q] = chanBand(c); return f >= p - 300 && f <= q + 300; });
+}
+function evToF(e) { const r = wf.getBoundingClientRect(); return xToF((e.clientX - r.left) / r.width); }
+for (const el of [wf, spec]) {
+  el.addEventListener("click", e => {
+    if (!S) return;
+    const c = chanAt(evToF(e));   // a click on a detected channel tunes to its carrier
+    if (c) api({ tune: c.f, mode: c.mode, refine: 1 }); else api({ tune: Math.round(evToF(e) / 10) * 10, snap: 1 });
+  });
+  el.addEventListener("mousemove", e => {
+    if (!S) return; const hv = $("hover"), r = $("scope").getBoundingClientRect();
+    const c = chanAt(evToF(e));
+    hv.style.display = "block"; hv.textContent = fmt(evToF(e)) + " kHz" + (c ? ` · channel ${khz(c.f)} ${c.mode.toUpperCase()}` : "");
+    hv.style.left = Math.min(e.clientX - r.left + 12, r.width - 90) + "px"; hv.style.top = (e.clientY - r.top + 12) + "px";
+  });
+  el.addEventListener("mouseleave", () => $("hover").style.display = "none");
+  el.addEventListener("wheel", e => { if (!S) return; e.preventDefault(); api({ tune: S.tune + (e.deltaY < 0 ? 50 : -50), mode: S.mode }); }, { passive: false });
+}
+window.addEventListener("resize", sizeCanvases);
+
+// channels
+function ago(s) { return s < 5 ? "live" : s < 60 ? `${Math.round(s)} s` : `${Math.round(s / 60)} min`; }
+function renderChans() {
+  const box = $("chanlist");
+  if (!chans.length) { box.innerHTML = '<div class="empty">No voice activity found yet.</div>'; return; }
+  const max = Math.max(...chans.map(c => c.score), 1);
+  box.innerHTML = "";
+  const live = c => lastNow - c.last < 5;
+  const sorted = [...chans].sort((a, b) => (live(b) - live(a)) || (live(a) ? b.score - a.score : b.last - a.last));
+  for (const c of sorted) {
+    const d = document.createElement("div");
+    const isCur = S && Math.abs(c.f - S.tune) < 1500;
+    d.className = "chan" + (isCur ? " cur" : "");
+    const a = lastNow - c.last;
+    d.innerHTML = `<span class="f">${fmt(c.f)}</span><span class="m">${c.mode}</span>
+      <span class="bar"><i style="width:${Math.round(c.score / max * 100)}%"></i></span>
+      <span class="ago ${a < 5 ? "live" : ""}">${ago(a)}</span>`;
+    d.onclick = () => api({ tune: c.f, mode: c.mode, refine: 1 });
+    box.append(d);
+  }
+}
+
+// audio
+let ctx = null, gain = null, dest = null, nextT = 0, playing = false, rec = null, recChunks = [];
+$("play").onclick = async () => {
+  if (!ctx) {
+    ctx = new AudioContext();
+    gain = ctx.createGain(); gain.gain.value = +$("vol").value; gain.connect(ctx.destination);
+    dest = ctx.createMediaStreamDestination(); gain.connect(dest);
+  }
+  playing = !playing;
+  if (playing) { await ctx.resume(); nextT = 0; } else { await ctx.suspend(); }
+  $("play").textContent = playing ? "■ Stop audio" : "▶ Start audio";
+  $("play").classList.toggle("on", playing);
+};
+$("vol").oninput = e => { if (gain) gain.gain.value = +e.target.value; };
+$("rec").onclick = () => {
+  if (!ctx || !playing) { $("info").textContent = "Start the audio first."; return; }
+  if (rec) { rec.stop(); return; }
+  recChunks = []; rec = new MediaRecorder(dest.stream);
+  rec.ondataavailable = e => recChunks.push(e.data);
+  rec.onstop = () => {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob(recChunks, { type: rec.mimeType }));
+    a.download = `websdr_${S ? fmt(S.tune) : "audio"}kHz_${new Date().toISOString().slice(0, 19).replace(/:/g, "")}.webm`;
+    a.click(); rec = null; $("rec").classList.remove("on"); $("rec").textContent = "● Record";
+  };
+  rec.start(); $("rec").classList.add("on"); $("rec").textContent = "■ Stop and save";
+};
+function playPcm(b64) {
+  const bin = atob(b64), n = bin.length >> 1, f = new Float32Array(n);
+  let peak = 0;
+  for (let i = 0; i < n; i++) {
+    let v = bin.charCodeAt(2 * i) | (bin.charCodeAt(2 * i + 1) << 8); if (v > 32767) v -= 65536;
+    f[i] = v / 32768; const a = Math.abs(f[i]); if (a > peak) peak = a;
+  }
+  document.querySelector("#meter i").style.width = Math.min(100, peak * 140) + "%";
+  if (!ctx || !playing) return;
+  const buf = ctx.createBuffer(1, n, S ? S.audio_rate : 8000); buf.copyToChannel(f, 0);
+  const src = ctx.createBufferSource(); src.buffer = buf; src.connect(gain);
+  const now = ctx.currentTime;
+  if (nextT < now + 0.05 || nextT > now + 1.0) nextT = now + 0.25;   // start or resync with a small buffer
+  src.start(nextT); nextT += buf.duration;
+  $("info").textContent = `buffer ${Math.round((nextT - now) * 1000)} ms`;
+}
+
+// transcripts
+let trs = [];
+$("trtoggle").onclick = () => S && api({ transcribe: S.transcribe ? 0 : 1 });
+try { $("unclear").checked = localStorage.getItem("websdr-unclear") === "1"; } catch (e) {}
+$("unclear").onchange = () => { try { localStorage.setItem("websdr-unclear", $("unclear").checked ? "1" : "0"); } catch (e) {} renderTr(); renderThread(false); };
+const esc = t => t.replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const STATUS = { known: "in the contest list", fixed: "corrected with the contest list", new: "not in the contest list" };
+function calls(t) {
+  const info = t.callinfo || (t.calls || []).map(c => ({ call: c, status: "new", heard: c, alts: [] }));
+  return info.map(c => {
+    let tip = `${c.call}${c.country ? " · " + c.country : ""} · ${STATUS[c.status] || ""}`;
+    if (c.status === "fixed") tip += ` (heard ${c.heard})`;
+    if (c.alts && c.alts.length) tip += ` · similar: ${c.alts.join(", ")}`;
+    return `<span class="call ${c.status}" title="${esc(tip)}. Click to open QRZ.com" data-call="${esc(c.call)}">${esc(c.call)}${c.status === "fixed" ? " ✎" : ""}</span>`;
+  }).join("");
+}
+document.addEventListener("click", e => {
+  const c = e.target.closest && e.target.closest(".call");
+  if (c) window.open(`https://www.qrz.com/db/${encodeURIComponent(c.dataset.call)}`, "_blank", "noopener");
+});
+function renderTr() {
+  const box = $("trlist"), show = trs.filter(t => t.text || $("unclear").checked);
+  if (!show.length) { box.innerHTML = '<div class="empty">No transcripts yet.</div>'; return; }
+  box.innerHTML = "";
+  for (const t of show.slice(-300).sort((x, y) => y.ts - x.ts)) {
+    const d = document.createElement("div"); d.className = "tr" + (t.text ? "" : " unclear");
+    const time = new Date(t.ts).toLocaleTimeString([], { hour12: false });
+    d.innerHTML = `<span class="t">${time}</span><span class="f" title="Tune to this channel">${fmt(t.f)}</span>
+      <span class="m">${t.mode}</span><span class="l">${t.lang || ""}</span>
+      <span>${t.audio ? '<button title="Play the segment">▶</button>' : ""}</span>
+      <span class="x" title="confidence ${Math.round(t.conf * 100)} %, ${t.dur} s">${t.text ? esc(t.text) : "(no clear speech, " + t.dur + " s)"}${calls(t)}</span>`;
+    if (t.text) d.querySelector(".x").style.opacity = 0.55 + 0.45 * Math.min(1, t.conf / 0.6);
+    d.querySelector(".f").onclick = () => api({ tune: t.f, mode: t.mode, refine: 1 });
+    const b = d.querySelector("button"); if (b) b.onclick = () => new Audio(t.audio).play();
+    box.append(d);
+  }
+}
+function renderTx() {
+  if (!txInfo || !S) return;
+  $("trtoggle").classList.toggle("on", txInfo.on);
+  $("trtoggle").textContent = txInfo.on ? "Transcribe: on" : "Transcribe: off";
+  $("trstatus").textContent = `Whisper ${txInfo.model}: ${txInfo.status} · ${txInfo.channels.length} of max ${txInfo.capacity} channels · queue ${txInfo.queue} · done ${txInfo.done}` +
+    (txInfo.dropped ? ` · dropped ${txInfo.dropped} (CPU too slow)` : "");
+  $("txch").innerHTML = "";
+  for (const c of txInfo.channels) {
+    const sp = document.createElement("span"); sp.className = "pill" + (c.talking ? " talk" : "");
+    sp.textContent = `${fmt(c.f)} ${c.mode.toUpperCase()}${c.pinned ? " (tuned)" : ""}`;
+    sp.onclick = () => api({ tune: c.f, mode: c.mode, refine: 1 }); $("txch").append(sp);
+  }
+}
+
+// view for each frequency: timeline and conversation thread
+let tl = [], tlWin = 30, sel = null, thread = [], playQ = null, playing1 = null;
+const keyOf = f => Math.round(f / 1000);
+// two channels can hear the same station: keep one segment if the text and the time are the same
+function dedupe(items) {
+  const out = [];
+  for (const t of [...items].sort((a, b) => a.ts - b.ts)) {
+    if (!out.some(o => Math.abs(o.ts - t.ts) < 2500 && o.text === t.text && keyOf(o.f) === keyOf(t.f))) out.push(t);
+  }
+  return out;
+}
+function setTab(t) {
+  $("feedView").hidden = t !== "feed"; $("freqView").hidden = t !== "freq";
+  $("tabFeed").classList.toggle("on", t === "feed"); $("tabFreq").classList.toggle("on", t === "freq");
+  try { localStorage.setItem("websdr-tab", t); } catch (e) {}
+  if (t === "freq") loadTimeline();
+}
+$("tabFeed").onclick = () => setTab("feed");
+$("tabFreq").onclick = () => setTab("freq");
+$("tlwin").onchange = e => { tlWin = +e.target.value; loadTimeline(); };
+function loadTimeline() {
+  fetch(`/api/timeline?minutes=${tlWin}`).then(r => r.json()).then(d => { tl = d; drawTimeline(); });
+}
+const tlc = $("tl"), tlx = tlc.getContext("2d"), LABEL = 118, ROW = 22, AXIS = 22;
+let tlRows = [];
+function drawTimeline() {
+  if ($("freqView").hidden) return;
+  const now = Date.now(), t0 = now - tlWin * 60000, dpr = window.devicePixelRatio || 1;
+  const groups = new Map();
+  for (const t of tl) {
+    if (t.ts < t0) continue;
+    const k = keyOf(t.f); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(t);
+  }
+  tlRows = [...groups.entries()].sort((a, b) => a[0] - b[0]).map(([k, items]) => ({ k, items: dedupe(items) }));
+  const cssW = tlc.clientWidth, cssH = Math.max(80, tlRows.length * ROW + AXIS);
+  tlc.style.height = cssH + "px"; tlc.width = Math.round(cssW * dpr); tlc.height = Math.round(cssH * dpr);
+  tlx.setTransform(dpr, 0, 0, dpr, 0, 0); tlx.clearRect(0, 0, cssW, cssH);
+  const x = ts => LABEL + (ts - t0) / (now - t0) * (cssW - LABEL - 6);
+  tlx.font = "12px ui-monospace, monospace"; tlx.textBaseline = "middle";
+  if (!tlRows.length) { tlx.fillStyle = css("--muted"); tlx.fillText("No segments in this time.", 10, 30); return; }
+  tlRows.forEach((r, i) => {
+    const y = i * ROW;
+    if (sel === r.k) { tlx.fillStyle = css("--accent-soft"); tlx.fillRect(0, y, cssW, ROW); }
+    else if (i % 2) { tlx.fillStyle = css("--bg"); tlx.fillRect(0, y, cssW, ROW); }
+    const n = r.items.filter(t => t.text).length, mode = r.items[r.items.length - 1].mode.toUpperCase();
+    tlx.fillStyle = css(sel === r.k ? "--accent" : "--text"); tlx.fillText(`${r.k}`, 6, y + ROW / 2);
+    const top = topCalls(r.items)[0];
+    tlx.fillStyle = css(top ? "--accent" : "--muted"); tlx.fillText(top ? top[0] : `${mode} ${n}`, 50, y + ROW / 2);
+    for (const t of r.items) {
+      const x1 = x(t.ts), x2 = Math.max(x1 + 2, x(t.ts + t.dur * 1000));
+      tlx.fillStyle = css(t.text ? "--accent" : "--muted"); tlx.globalAlpha = t.text ? 0.9 : 0.35;
+      tlx.fillRect(x1, y + 4, x2 - x1, ROW - 8);
+    }
+    tlx.globalAlpha = 1;
+  });
+  // time axis
+  const y = tlRows.length * ROW; tlx.strokeStyle = css("--line"); tlx.beginPath(); tlx.moveTo(LABEL, y + 0.5); tlx.lineTo(cssW, y + 0.5); tlx.stroke();
+  const step = [1, 2, 5, 10, 15, 30, 60, 120].map(m => m * 60000).find(s => (now - t0) / s <= 8);
+  tlx.fillStyle = css("--muted"); tlx.textAlign = "center";
+  for (let t = Math.ceil(t0 / step) * step; t <= now; t += step)
+    tlx.fillText(new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }), x(t), y + AXIS / 2);
+  tlx.textAlign = "left";
+}
+function tlHit(e) {
+  const r = tlc.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
+  const row = tlRows[Math.floor(py / ROW)]; if (!row) return {};
+  const now = Date.now(), t0 = now - tlWin * 60000, ts = t0 + (px - LABEL) / (r.width - LABEL - 6) * (now - t0);
+  let best = null, bd = 1e18;
+  if (px > LABEL) for (const t of row.items) {
+    const d = ts < t.ts ? t.ts - ts : ts > t.ts + t.dur * 1000 ? ts - t.ts - t.dur * 1000 : 0;
+    if (d < bd) { bd = d; best = t; }
+  }
+  const tol = (now - t0) / (r.width - LABEL) * 6;   // 6 px
+  return { row, seg: bd <= tol ? best : null, px, py };
+}
+tlc.addEventListener("mousemove", e => {
+  const h = tlHit(e), tip = $("tltip");
+  if (!h.seg) { tip.style.display = "none"; return; }
+  const t = h.seg, time = new Date(t.ts).toLocaleTimeString([], { hour12: false });
+  tip.innerHTML = `<b>${time}</b> · ${khz(t.f)} ${t.mode.toUpperCase()} · ${t.dur} s<br>${t.text ? esc(t.text) : "<i>no clear speech</i>"}`;
+  tip.style.display = "block";
+  tip.style.left = Math.min(h.px + 12, tlc.clientWidth - 330) + "px"; tip.style.top = (h.py + 14) + "px";
+});
+tlc.addEventListener("mouseleave", () => $("tltip").style.display = "none");
+tlc.addEventListener("click", e => {
+  const h = tlHit(e); if (!h.row) return;
+  if (sel !== h.row.k) openThread(h.row.k);
+  if (h.seg && h.seg.audio) playOne(h.seg.audio);
+});
+function openThread(k) {
+  sel = k; stopPlay(); drawTimeline();
+  $("thf").textContent = `${k} kHz`;
+  fetch(`/api/thread?f=${k * 1000}&tol=600`).then(r => r.json()).then(d => { thread = dedupe(d); renderThread(true); });
+}
+function topCalls(items) {
+  const n = new Map();
+  for (const t of items) for (const c of (t.callinfo || []).filter(c => c.status !== "new").map(c => c.call)) n.set(c, (n.get(c) || 0) + 1);
+  return [...n.entries()].sort((a, b) => b[1] - a[1]);
+}
+function renderThread(scroll) {
+  const box = $("thlist"); drawFix();
+  $("thcalls").innerHTML = topCalls(thread).slice(0, 12).map(([c, k]) =>
+    `<span class="call" data-call="${esc(c)}" title="heard ${k} times">${esc(c)} <span class="n">${k}</span></span>`).join("");
+  const show = thread.filter(t => t.text || $("unclear").checked);
+  if (!show.length) { box.innerHTML = '<div class="empty">No transcripts on this frequency yet.</div>'; return; }
+  box.innerHTML = "";
+  let prev = null;
+  for (const t of show) {
+    const d = document.createElement("div");
+    d.className = "msg" + (t.text ? "" : " unclear") + (prev && t.ts - prev > 120000 ? " gap" : "") + (playing1 === t.audio ? " playing" : "");
+    d.dataset.audio = t.audio || "";
+    d.innerHTML = `<span class="t">${new Date(t.ts).toLocaleTimeString([], { hour12: false })}</span>
+      <span>${t.audio ? '<button title="Play from here">▶</button>' : ""}</span>
+      <span class="x" title="${t.lang || ""} · confidence ${Math.round(t.conf * 100)} % · ${t.dur} s">${t.text ? esc(t.text) : "(no clear speech, " + t.dur + " s)"}${calls(t)}</span>`;
+    const b = d.querySelector("button"); if (b) b.onclick = () => startPlay(thread.indexOf(t));
+    box.append(d); prev = t.ts;
+  }
+  if (scroll && $("thfollow").checked) box.scrollTop = box.scrollHeight;
+}
+// play the conversation in time order; with Follow, it waits for new segments and continues
+let audioEl = null;
+function playOne(url) { stopPlay(); audioEl = new Audio(url); audioEl.play(); }
+function stopPlay() {
+  if (audioEl) { audioEl.onended = null; audioEl.pause(); audioEl = null; }
+  playQ = null; playing1 = null; $("thplay").textContent = "▶ Play all"; $("thplay").classList.remove("on");
+  document.querySelectorAll(".msg.playing").forEach(m => m.classList.remove("playing"));
+}
+function startPlay(i) {
+  stopPlay(); playQ = { i };
+  $("thplay").textContent = "■ Stop"; $("thplay").classList.add("on"); nextPlay();
+}
+function nextPlay() {
+  if (!playQ) return;
+  while (playQ.i < thread.length && !(thread[playQ.i].audio && (thread[playQ.i].text || $("unclear").checked))) playQ.i++;
+  if (playQ.i >= thread.length) {
+    if ($("thfollow").checked) { playQ.waiting = true; $("thplay").textContent = "■ Stop (waiting for new)"; } else stopPlay();
+    return;
+  }
+  playQ.waiting = false; $("thplay").textContent = "■ Stop";
+  const t = thread[playQ.i]; playing1 = t.audio;
+  document.querySelectorAll(".msg").forEach(m => m.classList.toggle("playing", m.dataset.audio === t.audio));
+  const el = document.querySelector(".msg.playing"); if (el && $("thfollow").checked) el.scrollIntoView({ block: "nearest" });
+  audioEl = new Audio(t.audio); audioEl.onended = () => { if (playQ) { playQ.i++; nextPlay(); } };
+  audioEl.play().catch(() => { if (playQ) { playQ.i++; setTimeout(nextPlay, 100); } });
+}
+$("thplay").onclick = () => {
+  if (playQ) { stopPlay(); return; }
+  if (sel === null) return;
+  // start with the first segment in the shown time window
+  const t0 = Date.now() - tlWin * 60000; let i = thread.findIndex(t => t.ts >= t0); startPlay(i < 0 ? 0 : i);
+};
+$("thlisten").onclick = () => {
+  if (sel === null) return;
+  const last = thread[thread.length - 1];
+  api({ tune: sel * 1000, mode: last ? last.mode : "", refine: 1 });
+};
+function replaceIn(list, t) {
+  const i = list.findIndex(o => o.audio && o.audio === t.audio);
+  if (i >= 0) { list[i] = t; return true; }
+  return false;
+}
+// the correction by ear: listen to the frequency, correct the pitch, then apply it to the frequency
+function threadF() { return thread.length ? thread[thread.length - 1].f : sel * 1000; }
+function drawFix() {
+  if (!S || sel === null) { $("thfix").hidden = true; return; }
+  const F = threadF(), d = Math.round(S.tune - F);
+  const near = Math.abs(S.tune - F) < 3000 && Math.abs(d) >= 5;
+  $("thfix").hidden = !near;
+  if (near) $("thdelta").textContent = `tuned ${fmt(S.tune)} kHz: ${d > 0 ? "+" : ""}${d} Hz`;
+}
+$("thapply").onclick = () => {
+  const F = threadF(), d = Math.round(S.tune - F);
+  if (!confirm(`Move ${fmt(F)} kHz by ${d > 0 ? "+" : ""}${d} Hz?\nThe saved segments of this frequency get the shifted audio and a new transcript. The original audio stays as .orig.wav.`)) return;
+  fetch(`/api/retune?f=${F}&delta=${d}`).then(() => {
+    $("thdelta").textContent = "applied; the segments are transcribed again";
+    setTimeout(() => openThread(Math.round(S.tune / 1000)), 3000);
+  });
+};
+function onTranscript(t) {
+  if (t.replace) {
+    replaceIn(tl, t); replaceIn(trs, t);
+    if (sel !== null && replaceIn(thread, t)) renderThread(false);
+    renderTr(); return;
+  }
+  tl.push(t);
+  if (sel !== null && keyOf(t.f) === sel) {
+    if (!thread.some(o => Math.abs(o.ts - t.ts) < 2500 && o.text === t.text)) thread.push(t);
+    renderThread(true);
+    if (playQ && playQ.waiting) nextPlay();
+  }
+}
+setInterval(drawTimeline, 5000);
+window.addEventListener("resize", drawTimeline);
+try { setTab(localStorage.getItem("websdr-tab") || "feed"); } catch (e) { setTab("feed"); }
+
+// SSTV images
+let sstv = [], sstvStat = null;
+function renderGallery() {
+  const box = $("gallery");
+  if (!sstv.length) return;
+  box.innerHTML = "";
+  for (const im of [...sstv].sort((a, b) => b.ts - a.ts).slice(0, 120)) {
+    const a = document.createElement("a"); a.href = im.url; a.target = "_blank";
+    const t = new Date(im.ts).toLocaleString([], { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+    a.innerHTML = `<img loading="lazy" src="${im.url}" alt="SSTV ${esc(im.mode)}"><span>${t} · ${khz(im.f)} kHz<br>${esc(im.mode)}${im.partial ? " · partial" : ""}</span>`;
+    box.append(a);
+  }
+}
+function renderSstvStat() {
+  if (!sstvStat) return;
+  const ch = sstvStat.channels;
+  $("sstvstat").textContent = ch.length ? `watching ${ch.map(c => khz(c.f)).join(", ")} kHz` : "no SSTV frequency in the view";
+  const live = $("sstvlive"); live.innerHTML = "";
+  for (const c of ch.filter(c => c.progress)) {
+    const p = c.progress, d = document.createElement("div"); d.className = "rx";
+    d.innerHTML = `<b>${khz(c.f)} kHz</b> · receiving ${esc(p.mode)} · ${p.lines}/${p.total_lines} lines<img src="/api/sstv/preview?f=${c.f}&t=${Date.now()}">`;
+    live.append(d);
+  }
+}
+fetch("/api/sstv").then(r => r.json()).then(d => { sstv = d; renderGallery(); });
+
+// events
+function connect() {
+  const es = new EventSource("/api/events");
+  es.addEventListener("state", e => { S = JSON.parse(e.data); if (S.wf_bins !== W) { W = S.wf_bins; } sizeCanvases(); drawState(); });
+  es.addEventListener("wf", e => {
+    const m = JSON.parse(e.data), bin = atob(m.d), q = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) q[i] = bin.charCodeAt(i);
+    drawLine(q);
+  });
+  es.addEventListener("audio", e => playPcm(JSON.parse(e.data)));
+  es.addEventListener("sstv", e => { sstv.push(JSON.parse(e.data)); renderGallery(); });
+  es.addEventListener("sstvstat", e => { sstvStat = JSON.parse(e.data); renderSstvStat(); });
+  es.addEventListener("tx", e => { txInfo = JSON.parse(e.data); renderTx(); });
+  es.addEventListener("tr", e => {
+    const t = JSON.parse(e.data); if (!t.replace) { trs.push(t); if (trs.length > 300) trs.shift(); renderTr(); } onTranscript(t);
+    if (!$("freqView").hidden) drawTimeline();
+  });
+  es.addEventListener("chans", e => { const m = JSON.parse(e.data); chans = m.list; current = m.current; lastNow = m.now; renderChans(); drawOverlay(); });
+  es.onerror = () => { $("dot").className = "dot bad"; $("status").textContent = "connection lost, retrying"; };
+}
+fetch("/api/state").then(r => r.json()).then(d => { S = d.state; chans = d.chans; trs = d.transcripts; W = S.wf_bins; sizeCanvases(); drawState(); renderTr(); connect(); });
+</script>
+</body>
+</html>

@@ -1,0 +1,21 @@
+# Only the named source files are in git. Logs, recordings, audio, transcripts,
+# downloaded data, models, builds and local settings stay out.
+*
+!.gitignore
+!README.md
+!LICENSE
+!requirements.txt
+!rspdx-websdr.sh
+!rspdx-websdr-stop.sh
+!websdr/
+!websdr/server.py
+!websdr/index.html
+!tools/
+!tools/hamtext.py
+!tools/whisper_service.py
+!tools/stream.c
+!tools/sstv/
+!tools/sstv/decoder.py
+!tools/sstv/test/
+!tools/sstv/test/run_tests.py
+!tools/sstv/test/sstv_encode.py
