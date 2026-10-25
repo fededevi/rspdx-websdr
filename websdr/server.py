@@ -14,6 +14,7 @@ same FFT, so many channels cost little.
 """
 import argparse
 import base64
+import collections
 import calendar
 import faulthandler
 import glob
@@ -39,10 +40,27 @@ import numpy as np
 from scipy import signal
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
-from hamtext import PROMPT, resolve  # noqa: E402
+from hamtext import prompt as ham_prompt, resolve  # noqa: E402
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools", "sstv"))
 from decoder import SSTVWatcher  # noqa: E402
+from hamtext import CALL as CALL_RE, check as check_call  # noqa: E402
+
+
+def load_tool(*path):
+    """Load a decoder module by its path: several decoders are named decoder.py."""
+    import importlib.util
+    full = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools", *path)
+    spec = importlib.util.spec_from_file_location("_".join(path).replace(".py", ""), full)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+ft8mod = load_tool("digimodes", "ft8", "decoder.py")
+pskmod = load_tool("digimodes", "psk_rtty", "decoder.py")
+cwmod = load_tool("digimodes", "cw", "decoder.py")
+faxmod = load_tool("wefax", "decoder.py")
 
 p = argparse.ArgumentParser()
 p.add_argument("--bind", default="127.0.0.1")
@@ -70,7 +88,7 @@ AR = 8000                # audio rate
 M = 32                   # bins in an audio channel: 32 * 250 Hz = 8 kHz
 BIN = AR / M
 FRAMES = 50              # frames for each read: 50 * 2 ms = 0.1 s
-HIST = 100               # waterfall lines for the channel detection (10 s)
+HIST = 470               # waterfall lines: 10 s for the voice detection, 47 s for the FT8/FT4 slot timing
 MAX_WF = 1600
 
 # sample rate, IF filter and the part of the band that the filter passes
@@ -114,6 +132,7 @@ state = {"center": args.center, "rate": int(args.rate), "tune": 7.1e6, "mode": "
 plan = None
 channels = {}            # rounded carrier -> {"f", "mode", "score", "first", "last"}
 sstv_chans = []
+digi_chans = []
 transcripts = deque(maxlen=20000)  # today's segments, for the threads and the timeline
 restart = threading.Event()
 streams = []             # the running rspdx-stream process, stopped when the server stops
@@ -321,6 +340,7 @@ class Transcriber:
     # on noise, Whisper can repeat the alphabet of the prompt
     # also subtitle credits, which Whisper learned from videos and often invents from noise
     PROMPT_COPY = re.compile(r"bravo,? charlie,? delta|foxtrot,? golf,? hotel|uniform,? victor,? whiskey"
+                             r"|germany,? italy,? japan|santiago,? sugar|kilowatt,? london"
                              r"|字幕|subtit|sottotitol|amara\.org")
 
     def __init__(self):
@@ -366,32 +386,41 @@ class Transcriber:
                     return False
         return True
 
-    def transcribe(self, pcm, ham):
-        """Whisper segments for 8 kHz int16 audio: on the GPU service, or on the CPU if it fails."""
+    def transcribe(self, pcm, pr):
+        """Whisper segments for 8 kHz int16 audio with the prompt pr: on the GPU service, or on the CPU."""
         if self.remote:
-            q = {"prompt": PROMPT} if ham else {}
+            q = {"prompt": pr} if pr else {}
             if args.lang:
                 q["lang"] = args.lang
             try:
                 req = urllib.request.Request(f"{args.remote}/transcribe?{urllib.parse.urlencode(q)}",
                                              data=pcm.astype("<i2").tobytes(), method="POST")
-                with urllib.request.urlopen(req, timeout=60) as r:
+                with urllib.request.urlopen(req, timeout=20) as r:
                     d = json.load(r)
                 self.label = f"{self.remote} on GPU"
                 return [SimpleNamespace(**x) for x in d["segments"]], SimpleNamespace(language=d["language"])
             except Exception as e:
-                print("GPU service error, this batch on the CPU:", e, flush=True)
-                self.label = f"{args.model} on CPU (GPU service error)"
+                # the CPU cannot transcribe many channels and keep the receiver in real time: wait for the GPU
+                print("GPU service error, no transcription for 60 s:", e, flush=True)
+                self.label = f"{self.remote} on GPU: no answer, retry in 60 s"
+                self.status = "waiting for the GPU service"
+                self.paused_until = time.time() + 60
+                return [], None
         if not self.load_local():
             return [], None
         audio = signal.resample_poly(pcm.astype(np.float32) / 32768, 2, 1)
         parts, info = self.model.transcribe(audio, language=args.lang, beam_size=1, vad_filter=True,
-                                            condition_on_previous_text=False, initial_prompt=PROMPT if ham else None)
+                                            condition_on_previous_text=False, initial_prompt=pr or None)
         return list(parts), info
 
     def submit(self, seg):
         if self.model is None and self.remote is None:
             return
+        if time.time() < getattr(self, "paused_until", 0):
+            return                      # the GPU service does not answer
+        if self.status != "ready" and self.remote:
+            self.status = "ready"
+            self.label = f"{self.remote} on GPU"
         while True:
             try:
                 self.q.put_nowait(seg)
@@ -431,12 +460,25 @@ class Transcriber:
             try:
                 # the prompt makes Whisper prefer the NATO alphabet, CQ, QRZ, five nine and so on
                 ham = not args.no_prompt and any(seg["mode"] in ("usb", "lsb") for seg in batch)
-                parts, info = self.transcribe(np.concatenate(pieces), ham)
+                pr = None
+                if ham:
+                    # the validated callsigns of these frequencies in the last 15 minutes, most frequent first
+                    with lock:
+                        heard = collections.Counter(
+                            c["call"] for t in transcripts for seg in batch
+                            if abs(t["f"] - seg["f"]) < 600 and t["ts"] > seg["ts"] - 900000
+                            for c in t.get("callinfo", []) if c.get("status") in ("known", "fixed"))
+                    pr = ham_prompt([c for c, _ in heard.most_common(6)])
+                parts, info = self.transcribe(np.concatenate(pieces), pr)
             except Exception as e:
                 parts, info = [], None
                 print("transcribe error:", e, flush=True)
             keep = [[] for _ in batch]
             for s in parts:
+                # Whisper sometimes copies the heading of the callsign list in the prompt: remove only the heading
+                s.text = re.sub(r"(?i)\s*stations on the frequency[.:,]?", " ", s.text).strip()
+                if not s.text:
+                    continue
                 if not (s.no_speech_prob < 0.6 and s.avg_logprob > -1.0 and s.compression_ratio < 2.4) \
                         or re.sub(r"[^\w ]", "", s.text.lower()).strip() in self.INVENTED \
                         or self.PROMPT_COPY.search(s.text.lower()):
@@ -584,8 +626,17 @@ def receiver():
         listen, listen_key, listen_t = None, None, 0
         ltrack = EdgeTracker()
         hist = None
+        hist_t = []
+        last_fine, narrow_k, last_dbg = 0, np.zeros(0, int), 0
+        global digi_chans
+        for ch in digi_chans:
+            ch.closed = True
+            ch.close()
+        digi_chans = []
         global sstv_chans
-        sstv_chans = [SSTVChannel(f, m) for f, m in SSTV_FREQS if abs(f - center) < pl.span / 2 - 4000]
+        sstv_chans = []
+        # the last seconds of I/Q, so that a decoder that starts on a found SSTV signal also gets its VIS header
+        replay = deque(maxlen=max(10, min(40, int(64e6 / (FRAMES * pl.hop * 8)))))
         txch = []
         last_detect = time.time()
         nbytes = FRAMES * pl.hop * 4
@@ -611,6 +662,7 @@ def receiver():
             frames = np.lib.stride_tricks.sliding_window_view(x, pl.N)[::pl.hop][:FRAMES]
             X = np.fft.fft(frames, axis=1)
             now = time.time()
+            replay.append((frame_no, x, now))
 
             # the channel that the user listens to
             with lock:
@@ -624,6 +676,16 @@ def receiver():
             listen_t += len(z)
             pcm, _ = listen(z)
             broadcast("audio", base64.b64encode(pcm.tobytes()).decode())
+            # the digital channels (FT8, FT4)
+            for ch in digi_chans:
+                zd = extract(X, frame_no, ch.f, center, ch.t, pl)
+                ch.t += len(zd)
+                pcm_d, _ = ch.demod(zd)
+                try:
+                    digi_q.put_nowait((ch, pcm_d, now - 0.1))
+                except queue.Full:
+                    pass
+
             # the SSTV channels
             for ch in sstv_chans:
                 zs = extract(X, frame_no, ch.f, center, ch.t, pl)
@@ -678,6 +740,7 @@ def receiver():
             P = np.fft.fftshift(P)[pl.lo:pl.hi]
             db = 10 * np.log10(P + 1e-20).astype(np.float32)
             hist = db[None] if hist is None else np.vstack((hist[-(HIST - 1):], db[None]))
+            hist_t = (hist_t + [now])[-HIST:]
             pooled = db.reshape(pl.wf_bins, pl.pool).max(1)
             floor = float(np.percentile(pooled, 20))
             q = np.clip((pooled - floor + 10) * 4, 0, 255).astype(np.uint8)
@@ -686,7 +749,7 @@ def receiver():
             # channel detection, auto mode and the list of channels for the transcription
             if now - last_detect >= 2 and len(hist) >= 30:
                 last_detect = now
-                found = detect(hist, view_freqs, float(np.median(hist)))
+                found = detect(hist[-100:], view_freqs, float(np.median(hist[-100:])))
                 with lock:
                     for c in found:
                         # one entry for each channel: merge detections less than 2 kHz apart
@@ -720,8 +783,105 @@ def receiver():
                 else:
                     txch = []
                 broadcast("chans", {"now": now, "list": listing, "current": found})
-                broadcast("sstvstat", {"channels": [{"f": c.f, "mode": c.mode, "progress": c.prog}
-                                                    for c in sstv_chans]})
+                # automatic SSTV channels on signals that look like SSTV; kept 15 minutes for the next picture
+                # the last 2 s: a new picture is found quickly, and the replay gives the decoder its VIS header
+                found_sstv, tiles = sstv_candidates(hist[-20:], view_freqs, float(np.median(hist[-100:])))
+                # FT8 and FT4 from their timing: a decoder for each tile where the energy stops at every slot end
+                slots = slot_tiles(hist, hist_t, view_freqs, float(np.median(hist[-100:])))
+                if now - last_dbg >= 30:      # what the detectors see, for the log
+                    last_dbg = now
+                    kk = lambda m: [round((float(view_freqs[0]) + k * 2500) / 1e3) for k in np.flatnonzero(m)][:12]
+                    print(f"detect: drops (mean, per slot) {slot_tiles.debug}", flush=True)
+                    print(f"detect: history {hist_t[-1] - hist_t[0]:.0f} s; FT8 {kk(slots.get('FT8', []))}; "
+                          f"FT4 {kk(slots.get('FT4', []))}; narrow (peaks) "
+                          f"{[(round((float(view_freqs[0]) + k * 2500) / 1e3), int(narrow_k[k])) for k in np.argsort(-narrow_k)[:8]] if len(narrow_k) else []}",
+                          flush=True)
+                for mode, mask in slots.items():
+                    for k in np.flatnonzero(mask):
+                        tiles[k] = 4 if mode == "FT8" else 5
+                        c = float(view_freqs[0]) + k * 2500 - 200        # the audio covers the tile plus 200 Hz
+                        ch = next((d for d in digi_chans if d.mode == mode and abs(d.f - c) < 100), None)
+                        if ch:
+                            ch.seen = now
+                        elif digi_ignore.get((mode, round(c)), 0) < now and sum(d.mode != "PSK" for d in digi_chans) < 8:
+                            # FT8 or FT4 there: a PSK/RTTY decoder on the same tile is not necessary
+                            for d in [d for d in digi_chans if d.mode == "PSK" and abs(d.f - c) < 100]:
+                                d.closed = True
+                                digi_chans.remove(d)
+                            digi_chans.append(DigiChan(c, mode))
+                            print(f"{mode}: new decoder for {(c + 200) / 1e3:.1f}-{(c + 2900) / 1e3:.1f} kHz", flush=True)
+                # PSK31 and RTTY on narrow signals where no FT8 or FT4 is
+                slot_k = {round((d.f + 200 - float(view_freqs[0])) / 2500) for d in digi_chans if d.mode != "PSK"}
+                if now - last_fine >= 10:
+                    last_fine = now
+                    fine = fine_narrow_tiles(replay, center, pl, view_freqs)
+                    if fine is not None:
+                        narrow_k = fine
+                for k in np.argsort(-narrow_k)[:int(np.count_nonzero(narrow_k))]:   # the busiest tiles first
+                    if k in slot_k or tiles[k] in (4, 5):
+                        continue
+                    c = float(view_freqs[0]) + k * 2500 - 200
+                    ch = next((d for d in digi_chans if d.mode == "PSK" and abs(d.f - c) < 100), None)
+                    if ch:
+                        ch.seen, ch.peaks = now, int(narrow_k[k])
+                        continue
+                    if digi_ignore.get(("PSK", round(c)), 0) >= now:
+                        continue
+                    psk = [d for d in digi_chans if d.mode == "PSK"]
+                    if len(psk) >= 8:
+                        # full: a busier tile replaces a decoder that has found nothing, on a quieter tile
+                        idle = [d for d in psk if d.count == 0 and d.peaks < narrow_k[k]]
+                        if not idle:
+                            continue
+                        old = min(idle, key=lambda d: d.peaks)
+                        old.closed = True
+                        digi_chans.remove(old)
+                    if True:
+                        digi_chans.append(DigiChan(c, "PSK"))
+                        digi_chans[-1].peaks = int(narrow_k[k])
+                        print(f"PSK/RTTY/CW: new decoders for {(c + 200) / 1e3:.1f}-{(c + 2900) / 1e3:.1f} kHz", flush=True)
+                for ch in [d for d in digi_chans if now - d.seen > 120
+                           or (now - d.created > (120 if d.mode != "PSK" else 300) and d.count == 0)]:
+                    if ch.count == 0:
+                        digi_ignore[(ch.mode, round(ch.f))] = now + 600   # no message in 2 minutes: not FT8 there
+                    ch.closed = True
+                    ch.close()
+                    digi_chans.remove(ch)
+                for c, m, kind in found_sstv:
+                    if abs(c - center) > pl.span / 2 - 3000:      # the view edges are filtered
+                        continue
+                    # SSTV is one tone at a time; AM music and data fill the band at each moment. A weather map
+                    # is mostly white, so it looks like a carrier: the fax decoder checks its line structure itself
+                    if kind == "sstv" and max(sstv_tonal(X, c + d, m, center, pl) for d in (-500, 0, 500)) < 0.8:
+                        k = int(((c - 1700 if m == "lsb" else c + 1700) - view_freqs[0]) // 2500)
+                        if 0 <= k < len(tiles) and tiles[k] == 3:
+                            tiles[k] = 2      # steady, but not one moving tone: not SSTV
+                        continue
+                    near = next((ch for ch in sstv_chans if ch.mode == m and abs(ch.f - c) < 1500), None)
+                    if near:
+                        near.seen = now
+                    elif sum(ch.auto for ch in sstv_chans) < 24:
+                        # three decoders: the grid carrier can be 500 Hz off, and a decoder takes about +-260 Hz
+                        new = [SSTVChannel(c + d, m, auto=True) for d in (-500, 0, 500)]
+                        Xr = [(fno, np.fft.fft(np.lib.stride_tricks.sliding_window_view(xr, pl.N)[::pl.hop][:FRAMES],
+                                               axis=1), tr) for fno, xr, tr in list(replay)]   # with the current block
+                        for ch in new:
+                            for fno, Xb, tr in Xr:
+                                zr = extract(Xb, fno, ch.f, center, ch.t, pl)
+                                ch.t += len(zr)
+                                pr, _ = ch.demod(zr)
+                                try:
+                                    sstv_q.put_nowait((ch, pr, tr - 0.1))
+                                except queue.Full:
+                                    pass
+                        sstv_chans.extend(new)
+                        print(f"SSTV/fax: new signal {c / 1e3:.1f} kHz {m}, decoders at -500/0/+500 Hz", flush=True)
+                sstv_chans[:] = [ch for ch in sstv_chans if not ch.auto or ch.prog or now - ch.seen < 900]
+                broadcast("sstvstat", {"channels": [{"f": c.f, "mode": c.mode, "progress": c.prog, "auto": c.auto}
+                                                    for c in sstv_chans],
+                                       "tiles": tiles, "tile_hz": 2500, "tile_f0": float(view_freqs[0]),
+                                       "replay_s": round(len(replay) * FRAMES * pl.hop / pl.rate, 1),
+                                       "digi": [{"f": d.f, "mode": d.mode} for d in digi_chans]})
                 broadcast("tx", {"status": tx.status, "model": tx.label, "queue": tx.q.qsize(), "capacity": tx.capacity,
                                  "done": tx.done, "dropped": tx.dropped, "on": state["transcribe"],
                                  "channels": [{"f": t.f, "mode": t.mode, "talking": t.seg is not None,
@@ -768,13 +928,18 @@ class Handler(BaseHTTPRequestHandler):
                     self.send(200, fh.read(), "image/png")
             else:
                 self.send(404, b"not found", "text/plain")
+        elif u.path == "/api/digi":
+            with lock:
+                self.send(200, json.dumps(list(digi_msgs)[-1000:]).encode(), "application/json")
         elif u.path == "/api/sstv":
             with lock:
                 self.send(200, json.dumps(list(sstv_images)).encode(), "application/json")
         elif u.path == "/api/sstv/preview":
             # the image that is coming in now, as PNG
             ch = next((c for c in sstv_chans if c.prog and abs(c.f - float(qs.get("f", 0))) < 100), None)
-            rgb = ch.watcher.preview() if ch else None
+            rgb = (ch.watcher.preview() if not ch.prog.get("fax") else ch.fax.preview()) if ch else None
+            if rgb is not None and ch.prog.get("fax") and ch.mode == "lsb":
+                rgb = 255 - np.asarray(rgb, np.uint8)     # the same inversion as for the saved picture
             if rgb is None:
                 self.send(404, b"no image", "text/plain")
                 return
@@ -893,21 +1058,288 @@ class Handler(BaseHTTPRequestHandler):
             self.send(404, b"not found", "text/plain")
 
 
-# SSTV calling frequencies; the receiver decodes those that are in the view
-SSTV_FREQS = [(3.730e6, "lsb"), (3.735e6, "lsb"), (7.165e6, "lsb"), (7.171e6, "lsb"), (14.230e6, "usb"),
-              (14.233e6, "usb"), (21.340e6, "usb"), (28.680e6, "usb")]
 sstv_images = deque(maxlen=300)
-sstv_q = queue.Queue(maxsize=200)
+sstv_q = queue.Queue(maxsize=2000)
+
+
+def sstv_candidates(hist, freqs, floor):
+    """SSTV (about 1.5 kHz wide) and weather fax (about 1 kHz wide) candidates; see one_tone_candidates."""
+    a, tiles = one_tone_candidates(hist, freqs, floor, 1500, 1200)
+    b, tiles_b = one_tone_candidates(hist, freqs, floor, 1000, 1400)
+    tiles = [max(x, y) for x, y in zip(tiles, tiles_b)]
+    out = [(c, m, "sstv") for c, m in a]
+    for c, m in b:
+        if all(abs(c - o[0]) > 1500 or o[1] != m for o in out):
+            out.append((c, m, "fax"))
+    return out, tiles
+
+
+def one_tone_candidates(hist, freqs, floor, width, start):
+    """Signals that look like SSTV: a band of about 1.5 kHz that is on nearly all the time, at a steady level.
+
+    Returns the carrier of each, for the sideband of its band. Voice changes its level all the time,
+    so it is not found; a picture takes 36 to 120 s, so the last 10 s show it clearly.
+    """
+    lin = 10 ** (hist / 10)
+    comb = np.abs(((freqs + 100e3) % 200e3) - 100e3) < 1.5e3
+    lin[:, comb] = 10 ** (floor / 10)
+    cs = np.concatenate((np.zeros((len(lin), 1)), np.cumsum(lin, axis=1)), axis=1)
+    w = int(width / BIN)               # the band that the tones fill, in 250 Hz bins
+    ts = 10 * np.log10((cs[:, w:] - cs[:, :-w]) / w / 10 ** (floor / 10))
+    act, sd, lvl = (ts > 6).mean(0), ts.std(0), ts.mean(0)
+    # the tones fill the whole band; one carrier would also be steady, but in one bin only
+    bins = 10 * np.log10(lin.mean(0) / 10 ** (floor / 10))
+    filled = np.lib.stride_tricks.sliding_window_view(bins, w).min(1)[:len(act)]
+    ok = (act > 0.85) & (sd < 3.0) & (filled > 3)
+    # what the detector found in each 2.5 kHz tile of the view, for the page:
+    # 0 quiet, 1 varying signal (voice), 2 steady signal that is not SSTV, 3 SSTV candidate
+    ntile = int(np.ceil((freqs[-1] - freqs[0]) / 2500)) + 1
+    tiles = np.zeros(ntile, np.int8)
+    ti = ((freqs[:len(act)] - freqs[0]) // 2500).astype(int)
+    np.maximum.at(tiles, ti, np.where(lvl > 6, np.where(ok, 2, 1), 0).astype(np.int8))
+    out = []
+    for i in np.argsort(-lvl):
+        if not ok[i]:
+            continue
+        lo_f, hi_f = freqs[i], freqs[i] + w * BIN
+        # SSTV is about 1.2 kHz wide, voice about 2.4 kHz: the 500 Hz on both sides of the window
+        # must be much weaker than the window, and for voice one side is still in the voice band
+        g = int(250 / BIN)
+        side = int(500 / BIN)
+        if i - g - side < 0 or i + w + g + side > lin.shape[1]:
+            continue
+        inner = lin[:, i:i + w].mean()
+        left = lin[:, i - g - side:i - g].mean()
+        right = lin[:, i + w + g:i + w + g + side].mean()
+        inner_db = 10 * np.log10(inner) - floor
+        side_db = 10 * np.log10(max(left, right)) - floor
+        if side_db > max(3.0, 0.35 * inner_db):
+            continue
+        tiles[ti[i]] = 3
+        # the tones are 1100-2300 Hz from the carrier; SSTV and weather fax can be in either sideband
+        for c, mode in ((round((lo_f - start) / 500) * 500, "usb"), (round((hi_f + start) / 500) * 500, "lsb")):
+            if all(abs(c - o[0]) > 2500 or o[1] != mode for o in out):
+                out.append((c, mode))
+        if len(out) >= 12:
+            break
+    return out, tiles.tolist()
+
+
+def slot_tiles(hist, hist_t, freqs, floor):
+    """FT8 and FT4 from their timing: all stations send in the same UTC slots and stop before the
+    end of each slot, so the energy of a tile drops at the same point of every slot."""
+    t = np.asarray(hist_t)
+    out = {}
+    if len(t) < 2 or t[-1] - t[0] < 46:      # three full slots, so that a chance pattern does not pass
+        return out
+    tile = ((freqs - freqs[0]) // 2500).astype(int)
+    starts = np.r_[0, np.flatnonzero(np.diff(tile)) + 1]
+    P = np.add.reduceat(10 ** (hist / 10), starts, axis=1) / np.diff(np.r_[starts, len(tile)])
+    drops = {}
+    for mode, period, on_win, off_win in (("FT8", 15.0, (2.0, 12.0), (13.6, 14.9)), ("FT4", 7.5, (1.2, 4.8), (6.0, 7.3))):
+        ph = t % period
+        on = (ph >= on_win[0]) & (ph <= on_win[1])
+        off = (ph >= off_win[0]) & (ph <= off_win[1])
+        if on.sum() < 20 or off.sum() < 6:
+            continue
+        p_on, p_off = P[on].mean(0), P[off].mean(0)
+        drop = 10 * np.log10(p_on / (p_off + 1e-30))
+        level = 10 * np.log10(p_on) - floor
+        found = (drop > 3) & (level > 3)
+        slot_tiles.debug[mode] = sorted(((round(float(drop[k]), 1), k) for k in np.argsort(-drop)[:4]), reverse=True)
+        per_slot = []
+        # the drop must be in each slot, not only on average: a voice station with a regular rhythm fails
+        for n in np.unique(np.floor(t / period))[1:-1]:
+            sl = np.floor(t / period) == n
+            o, f = sl & on, sl & off
+            if o.sum() >= 10 and f.sum() >= 3:
+                d = 10 * np.log10(P[o].mean(0) / (P[f].mean(0) + 1e-30))
+                per_slot.append(d)
+                found &= d > 3
+        slot_tiles.debug[mode] = [(dr, [round(float(p[k]), 1) for p in per_slot]) for dr, k in slot_tiles.debug[mode]]
+        out[mode] = found
+        drops[mode] = drop
+    # an FT8 or FT4 activity is at most about 3 kHz wide: a longer run of marked tiles is another signal
+    for mode, m in out.items():
+        edges = np.flatnonzero(np.diff(np.r_[0, m.astype(int), 0]))
+        for a, b in zip(edges[::2], edges[1::2]):
+            if b - a > 3:
+                m[a:b] = False
+    # FT4 also stops at every 15 s, and FT8 half fits the 7.5 s pattern: the larger drop tells which it is
+    if "FT8" in out and "FT4" in out:
+        ft8 = out["FT8"] & (drops["FT8"] >= drops["FT4"])
+        out["FT4"] = out["FT4"] & (drops["FT4"] > drops["FT8"])
+        out["FT8"] = ft8
+    return out
+
+
+def fine_narrow_tiles(replay, center, pl, freqs):
+    """Tiles with narrow signals (CW, PSK, RTTY), from a fine spectrum (about 16 Hz) of the last second.
+
+    A narrow signal is a peak more than 10 dB above the local level within +-1 kHz. The local level
+    must be near the noise floor: AM broadcast and voice raise it with their sidebands."""
+    from scipy.ndimage import uniform_filter1d
+    blocks = list(replay)[-10:]
+    if len(blocks) < 5:
+        return None
+    iq = np.concatenate([x[pl.hop:] for _, x, _ in blocks])
+    n = 1 << int(np.ceil(np.log2(pl.rate / 16)))
+    seg = iq[:len(iq) // n * n].reshape(-1, n)
+    if len(seg) == 0:
+        return None
+    P = np.fft.fftshift(np.mean(np.abs(np.fft.fft(seg * np.hanning(n), axis=1)) ** 2, axis=0))
+    f = center + (np.arange(n) - n // 2) * pl.rate / n
+    inside = (f >= freqs[0]) & (f <= freqs[-1])
+    f, db = f[inside], 10 * np.log10(P[inside] + 1e-30)
+    floor = np.percentile(db, 30)
+    local = uniform_filter1d(db, int(2000 / (pl.rate / n)))      # the level within +-1 kHz, in dB
+    peak = (db - local > 10) & (local - floor < 6)
+    tile = ((f - freqs[0]) // 2500).astype(int)
+    out = np.zeros(int((freqs[-1] - freqs[0]) // 2500) + 1, int)
+    np.add.at(out, tile[peak], 1)
+    return out          # the number of narrow peaks in each tile
+
+
+def narrow_tiles(hist, freqs, floor):
+    """Tiles with narrow signals (PSK, RTTY, CW, carriers): a 250 Hz bin well above the noise,
+    with the bins 500 Hz to each side much lower."""
+    db = 10 * np.log10((10 ** (hist / 10)).mean(0)) - floor
+    side = np.maximum(np.r_[db[2:], [db[-1]] * 2], np.r_[[db[0]] * 2, db[:-2]])
+    # an AM broadcast carrier is narrow too, but its sidebands fill 1-2 kHz on both sides
+    lin = 10 ** (db / 10)
+    k = np.ones(5) / 5                                  # 1.25 kHz of bins
+    near = 10 * np.log10(np.convolve(lin, k, mode="same"))
+    left, right = np.r_[[near[0]] * 6, near[:-6]], np.r_[near[6:], [near[-1]] * 6]   # centered 1.5 kHz away
+    peak = (db > 8) & (db - side > 6) & (np.minimum(left, right) < 4)
+    tile = ((freqs - freqs[0]) // 2500).astype(int)
+    out = np.zeros(tile.max() + 1, bool)
+    out[tile[peak]] = True
+    return out
+
+
+slot_tiles.debug = {}
+
+
+class DigiChan:
+    """A channel of 2.7 kHz USB audio for a digital decoder: FT8, FT4, or PSK/RTTY."""
+
+    def __init__(self, f, mode):
+        self.f, self.mode = f, mode
+        self.demod = Demod("usb")
+        self.t = 0
+        self.seen = self.created = time.time()
+        self.count = 0
+        self.peaks = 0
+        self.closed = False
+        if mode in ("FT8", "FT4"):
+            self.watchers = [ft8mod.FT8Watcher(label=f"{f / 1e3:.0f}kHz", modes=(mode,))]
+        else:
+            # narrow signals: PSK31/63, RTTY and CW; each decoder gives text only if the timing fits its mode
+            self.watchers = [pskmod.DigiWatcher(label=f"{f / 1e3:.0f}kHz"), cwmod.CWWatcher(label=f"{f / 1e3:.0f}kHz")]
+
+    def close(self):
+        for w in self.watchers:
+            if hasattr(w, "close"):
+                w.close()
+
+
+digi_q = queue.Queue(maxsize=4000)
+
+
+def digi_worker():
+    """Feed the digital decoders in their own thread, so that the receiver loop stays in real time."""
+    while True:
+        cw_flush(time.time())
+        ch, pcm, ts = digi_q.get()
+        if ch.closed:
+            continue
+        for w in ch.watchers:
+            try:
+                for ev in w.feed(pcm, ts):
+                    if ch.mode == "PSK":     # PSK, RTTY and CW give text chunks, not slots
+                        ev = dict(ev, slot_ts=ev["ts"], snr_db=round(ev.get("snr_db", 0)))
+                    digi_event(ch, ev)
+            except Exception as e:  # one decoder error must not stop the others
+                print(f"{ch.mode} decoder error:", e, flush=True)
+
+
+digi_msgs = deque(maxlen=5000)
+digi_seen = deque(maxlen=2000)       # (mode, slot, text) of the last messages, against duplicates of overlapping channels
+
+
+digi_ignore = {}                     # (mode, frequency) -> time until which no decoder starts there
+
+
+cw_lines = {}                        # (channel, tone) -> CW words that wait for a pause
+
+
+def cw_flush(now, force=False):
+    """Send the CW lines that had a pause of 4 s, or that are long enough."""
+    for key in [k for k, v in cw_lines.items() if force or now - v["last"] > 4 or len(v["text"]) >= 80]:
+        v = cw_lines.pop(key)
+        digi_event(v["ch"], dict(v["ev"], text=v["text"], joined=True))
+
+
+def digi_event(ch, ev):
+    if ev.get("mode") == "CW" and not ev.get("joined"):
+        # the CW decoder gives one word at a time: join the words of one signal into a line
+        key = (id(ch), round(ev["audio_hz"] / 20))
+        v = cw_lines.setdefault(key, {"ch": ch, "ev": ev, "text": "", "last": 0})
+        v["text"] = (v["text"] + " " + ev["text"]).strip()
+        v["last"] = time.time()
+        cw_flush(v["last"])
+        return
+    ch.count += 1
+    key = (ev["mode"], round(ev["slot_ts"]), ev["text"])
+    if key in digi_seen:
+        return
+    digi_seen.append(key)
+    calls = []
+    for tok in re.findall(r"[A-Z0-9/]{3,12}", ev["text"]):
+        base = max(tok.split("/"), key=len)
+        if CALL_RE.match(base):
+            # an FT8 message has a checksum, so its callsign is exact: only mark it, never correct it
+            best, status, alts = check_call(base)
+            if status:
+                known = status == "known"
+                calls.append({"call": base, "status": "known" if known else "new", "heard": base,
+                              "alts": [] if known else ([best] if status == "fixed" else alts)})
+    item = {"ts": ev["slot_ts"] * 1000, "f": ch.f + ev["audio_hz"], "mode": ev["mode"], "snr": ev.get("snr_db"),
+            "text": ev["text"], "callinfo": calls, "calls": [c["call"] for c in calls]}
+    with lock:
+        digi_msgs.append(item)
+    with open(os.path.join(LOGS, time.strftime("digital_%Y%m%d.jsonl")), "a") as fh:
+        fh.write(json.dumps(item) + "\n")
+    broadcast("digi", item)
+
+
+def sstv_tonal(X, c, mode, center, pl):
+    """How much SSTV is one tone at a time: in each short FFT frame, the share of the
+    strongest pair of bins in the picture band. SSTV (FM) is near 1; AM music, data and
+    noise spread their energy over the band and give about 2 / (number of bins)."""
+    band = np.arange(1100, 2400, BIN)
+    f = c + band if mode == "usb" else c - band
+    k = np.round((f - center) / BIN).astype(int) % pl.N
+    P = np.abs(X[:, k]) ** 2
+    pair = P[:, 1:] + P[:, :-1]
+    tonal = float(np.median(pair.max(1) / (P.sum(1) + 1e-30)))
+    # the SSTV tone moves with the picture; a carrier stays in the same bin
+    pos = pair.argmax(1)
+    moving = float(np.mean(np.abs(pos - np.bincount(pos).argmax()) > 1))   # more than one bin from its usual place
+    return tonal if moving > 0.08 else 0.0     # a sync pulse or a change of brightness in the block
 
 
 class SSTVChannel:
-    def __init__(self, f, mode):
-        self.f, self.mode = f, mode
+    def __init__(self, f, mode, auto=False):
+        self.f, self.mode, self.auto = f, mode, auto
+        self.seen = time.time()
         self.demod = Demod(mode)
         self.t = 0
         day = time.strftime("%Y%m%d")
         self.day = day
         self.watcher = SSTVWatcher(os.path.join(LOGS, "sstv", day), label=f"{f / 1e3:.0f}kHz")
+        # a weather fax is also one moving tone, so the same audio goes to a fax decoder
+        self.fax = faxmod.WefaxWatcher(os.path.join(LOGS, "sstv", day), label=f"fax_{f / 1e3:.0f}kHz_{mode}")
         self.prog = None
 
 
@@ -915,6 +1347,13 @@ def sstv_item(path, f, mode, ts, partial, lines, offset):
     day, name = path.split(os.sep)[-2:]
     return {"ts": ts * 1000, "f": f, "mode": mode, "partial": partial, "lines": lines,
             "offset_hz": offset, "url": f"/sstv/{day}/{name}"}
+
+
+def invert_png(path):
+    from PIL import Image, ImageOps
+    with Image.open(path) as im:
+        out = ImageOps.invert(im.convert("L"))
+    out.save(path)
 
 
 def sstv_worker():
@@ -928,7 +1367,20 @@ def sstv_worker():
                 with lock:
                     sstv_images.append(item)
                 broadcast("sstv", item)
-            ch.prog = ch.watcher.progress()
+            for img in ch.fax.feed(pcm, ts):
+                if ch.mode == "lsb":
+                    invert_png(img["path"])     # a fax is sent in USB: in LSB, black and white change places
+                item = sstv_item(img["path"], ch.f, f"Weather fax {img['lpm']} lpm {ch.mode.upper()}", img["ts"],
+                                 img["partial"], img["lines"], img.get("offset_hz"))
+                with lock:
+                    sstv_images.append(item)
+                broadcast("sstv", item)
+            p = ch.watcher.progress()
+            if p is None and ch.fax.progress():
+                fp = ch.fax.progress()
+                p = {"mode": f"Weather fax {fp.get('lpm', '')} lpm", "lines": fp.get("lines", 0), "total_lines": "?",
+                     "ts": fp.get("ts"), "fax": True}
+            ch.prog = p
         except Exception as e:  # a decoder error must not stop the other channels
             print("SSTV error:", e, flush=True)
 
@@ -1028,13 +1480,29 @@ def main():
             transcripts.append(t)
     except FileNotFoundError:
         pass
-    for path in sorted(glob.glob(os.path.join(LOGS, "sstv", "*", "*.png")))[-300:]:
+    for path in sorted(glob.glob(os.path.join(LOGS, "sstv", "*", "*.png")), key=os.path.getmtime)[-300:]:
         # the decoder names the files sstv_<f>kHz_<UTC date>-<UTC time>_<mode>.png
         m = re.match(r"sstv_(\d+)kHz_(\d{8})-(\d{6})_(.+)\.png$", os.path.basename(path))
         if m:
             ts = calendar.timegm(time.strptime(m.group(2) + m.group(3), "%Y%m%d%H%M%S"))
             sstv_images.append(sstv_item(path, float(m.group(1)) * 1000, m.group(4), ts, None, None, None))
+        # the fax decoder names them wefax_fax_<f>kHz_<sideband>_<UTC date>-<UTC time>_<lpm>_<ioc>.png
+        m = re.match(r"wefax_fax_(\d+)kHz_(usb|lsb)_(\d{8})-(\d{6})_(\d+)_(\d+)\.png$", os.path.basename(path))
+        if m:
+            ts = calendar.timegm(time.strptime(m.group(3) + m.group(4), "%Y%m%d%H%M%S"))
+            sstv_images.append(sstv_item(path, float(m.group(1)) * 1000, f"Weather fax {m.group(5)} lpm {m.group(2).upper()}",
+                                         ts, None, None, None))
+    try:  # the digital messages of today
+        with open(os.path.join(LOGS, time.strftime("digital_%Y%m%d.jsonl"))) as fh:
+            for line in fh:
+                try:
+                    digi_msgs.append(json.loads(line))
+                except ValueError:
+                    pass
+    except FileNotFoundError:
+        pass
     threading.Thread(target=sstv_worker, daemon=True).start()
+    threading.Thread(target=digi_worker, daemon=True).start()
     threading.Thread(target=validate_old, daemon=True).start()
     if args.remote:   # the CPU alone has no spare time for old segments
         threading.Thread(target=backfill, daemon=True).start()

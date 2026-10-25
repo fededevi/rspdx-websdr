@@ -76,6 +76,12 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .6px; color: va
 .pill { font: 12px ui-monospace, monospace; padding: 2px 7px; border-radius: 10px; border: 1px solid var(--line); color: var(--muted); cursor: pointer; }
 .pill.talk { border-color: var(--ok); color: var(--ok); font-weight: 600; }
 #trlist { max-height: 420px; overflow-y: auto; }
+#digilist { max-height: 360px; overflow-y: auto; }
+.dg { display: grid; grid-template-columns: 70px 84px 40px 44px minmax(0, 1fr); gap: 8px; padding: 4px; border-top: 1px solid var(--line); font-size: 13px; align-items: baseline; }
+.dg .t, .dg .s { color: var(--muted); font: 12px ui-monospace, monospace; }
+.dg .f { font-family: ui-monospace, monospace; font-weight: 600; }
+.dg .m { color: var(--muted); font-size: 11px; }
+.dg .x { font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
 .tr { display: grid; grid-template-columns: 70px 84px 34px 26px 30px minmax(0, 1fr); gap: 8px; align-items: baseline; padding: 6px 4px; border-top: 1px solid var(--line); font-size: 13px; }
 .tr .t { color: var(--muted); font-family: ui-monospace, monospace; font-size: 12px; }
 .tr .f { font-family: ui-monospace, monospace; font-weight: 600; cursor: pointer; color: var(--accent); }
@@ -151,7 +157,7 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .6px; color: va
       <canvas id="axis"></canvas>
       <div id="hover"></div>
     </div>
-    <div class="hint">Click the waterfall to tune. In SSB, click the middle of the signal: the receiver then finds the carrier in about 5 s. Use the mouse wheel or the ±10 buttons to correct the pitch by ear. The 200 kHz grid of strong lines is local interference.</div>
+    <div class="hint">Strip under the spectrum (SSTV search, 2.5 kHz tiles): grey = varying signal, orange = steady but not SSTV, purple = SSTV candidate, teal = FT8, blue = FT4 (found from the slot timing). Purple bands on the waterfall = SSTV decoders in memory. Click the waterfall to tune. In SSB, click the middle of the signal: the receiver then finds the carrier in about 5 s. Use the mouse wheel or the ±10 buttons to correct the pitch by ear. The 200 kHz grid of strong lines is local interference.</div>
   </section>
   <aside class="card">
     <h2>Active channels</h2>
@@ -193,6 +199,10 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .6px; color: va
       </div>
     </div>
     <div class="hint">Whisper transcribes the voice of all active channels, plus the tuned channel. Radio voice is noisy, so the text can be wrong. Click ▶ to hear a segment, or click a frequency to tune to it.</div>
+  </section>
+  <section class="card wide">
+    <div class="trhead"><h2>Digital</h2><span class="hint" id="digistat" style="margin:0"></span></div>
+    <div id="digilist"><div class="empty">No digital messages yet. The receiver starts an FT8 or FT4 decoder where it finds their slot timing.</div></div>
   </section>
   <section class="card wide">
     <div class="trhead"><h2>SSTV images</h2><span class="hint" id="sstvstat" style="margin:0"></span></div>
@@ -330,6 +340,17 @@ function drawSpec() {
     if (lx > labelEnd + 4 * dpr) { sctx.fillText(label, lx, h - 7 * dpr); labelEnd = lx + tw; }
   }
   sctx.globalAlpha = 1; sctx.textBaseline = "alphabetic";
+  // what the SSTV detector found in each tile, as a strip above the channel strip
+  if (sstvStat && sstvStat.tiles) {
+    const col = [null, css("--muted"), css("--warn"), "#a855f7", "#14b8a6", "#0ea5e9"];
+    sstvStat.tiles.forEach((t, k) => {
+      if (!t) return;
+      const f0 = sstvStat.tile_f0 + k * sstvStat.tile_hz, x1 = fToX(f0) * w, x2 = fToX(f0 + sstvStat.tile_hz) * w;
+      sctx.fillStyle = col[t]; sctx.globalAlpha = t === 3 ? 1 : 0.55;
+      sctx.fillRect(x1, h - 14 * dpr, Math.max(1, x2 - x1 - 1), 6 * dpr);
+    });
+    sctx.globalAlpha = 1;
+  }
   // channels that are transcribed: green when they talk
   if (txInfo && txInfo.on) for (const c of txInfo.channels) {
     const x = fToX(c.f) * w; sctx.fillStyle = c.talking ? css("--ok") : css("--muted");
@@ -337,7 +358,8 @@ function drawSpec() {
   }
   // receive bandwidth and channel bandwidth
   sctx.font = `${11 * dpr}px ui-monospace, monospace`; sctx.textBaseline = "top";
-  const label = `span ${mhz(S.span)} · IF filter ${mhz(S.bw)} · ${S.rate / 1e6} MS/s · ${(S.span / W).toFixed(0)} Hz/px`;
+  const label = `span ${mhz(S.span)} · IF filter ${mhz(S.bw)} · ${S.rate / 1e6} MS/s · ${(S.span / W).toFixed(0)} Hz/px` +
+    (sstvStat && sstvStat.replay_s ? ` · replay ${sstvStat.replay_s} s` : "");
   const tw = sctx.measureText(label).width;
   sctx.fillStyle = css("--panel"); sctx.globalAlpha = 0.85; sctx.fillRect(4 * dpr, 4 * dpr, tw + 10 * dpr, 16 * dpr); sctx.globalAlpha = 1;
   sctx.fillStyle = css("--muted"); sctx.fillText(label, 9 * dpr, 7 * dpr);
@@ -383,6 +405,14 @@ function drawOverlay() {
       octx.fillStyle = live ? "#7ee787" : "#aab4be"; octx.fillText(label, lx + 3 * dpr, 4 * dpr);
       labelEnd = lx + tw;
     }
+  }
+  // the SSTV decoders in memory: purple bands where the picture tones are (1100-2300 Hz from the carrier)
+  if (sstvStat) for (const c of sstvStat.channels) {
+    const [p, q] = c.mode === "lsb" ? [c.f - 2300, c.f - 1100] : [c.f + 1100, c.f + 2300];
+    const x1 = fToX(p) * w, x2 = Math.max(x1 + 2 * dpr, fToX(q) * w);
+    octx.fillStyle = "#a855f7"; octx.globalAlpha = c.progress ? 0.45 : 0.18; octx.fillRect(x1, 18 * dpr, x2 - x1, h);
+    octx.globalAlpha = 0.9; octx.fillStyle = "#000"; octx.fillRect(x1, 18 * dpr, 34 * dpr, 12 * dpr);
+    octx.fillStyle = "#d8b4fe"; octx.fillText("SSTV", x1 + 2 * dpr, 19 * dpr);
   }
   octx.globalAlpha = 1;
 }
@@ -719,6 +749,21 @@ setInterval(drawTimeline, 5000);
 window.addEventListener("resize", drawTimeline);
 try { setTab(localStorage.getItem("websdr-tab") || "feed"); } catch (e) { setTab("feed"); }
 
+// digital messages
+let digi = [];
+function renderDigi() {
+  const box = $("digilist");
+  if (!digi.length) return;
+  box.innerHTML = "";
+  for (const m of [...digi].sort((a, b) => b.ts - a.ts).slice(0, 300)) {
+    const d = document.createElement("div"); d.className = "dg";
+    d.innerHTML = `<span class="t">${new Date(m.ts).toLocaleTimeString([], { hour12: false })}</span><span class="f">${fmt(m.f)}</span>
+      <span class="m">${esc(m.mode)}</span><span class="s">${m.snr == null ? "" : m.snr + " dB"}</span><span class="x">${esc(m.text)}${calls(m)}</span>`;
+    box.append(d);
+  }
+}
+fetch("/api/digi").then(r => r.json()).then(d => { digi = d; renderDigi(); });
+
 // SSTV images
 let sstv = [], sstvStat = null;
 function renderGallery() {
@@ -735,7 +780,8 @@ function renderGallery() {
 function renderSstvStat() {
   if (!sstvStat) return;
   const ch = sstvStat.channels;
-  $("sstvstat").textContent = ch.length ? `watching ${ch.map(c => khz(c.f)).join(", ")} kHz` : "no SSTV frequency in the view";
+  $("digistat").textContent = (sstvStat.digi || []).length ? `decoders: ${sstvStat.digi.map(d => `${d.mode} ${khz(d.f + 200)}-${khz(d.f + 2900)}`).join(", ")} kHz` : "no FT8 or FT4 found in the view";
+  $("sstvstat").textContent = ch.length ? `watching ${ch.map(c => khz(c.f) + (c.auto ? " (found)" : "")).join(", ")} kHz` : "no SSTV frequency in the view";
   const live = $("sstvlive"); live.innerHTML = "";
   for (const c of ch.filter(c => c.progress)) {
     const p = c.progress, d = document.createElement("div"); d.className = "rx";
@@ -755,8 +801,9 @@ function connect() {
     drawLine(q);
   });
   es.addEventListener("audio", e => playPcm(JSON.parse(e.data)));
+  es.addEventListener("digi", e => { digi.push(JSON.parse(e.data)); if (digi.length > 3000) digi.shift(); renderDigi(); });
   es.addEventListener("sstv", e => { sstv.push(JSON.parse(e.data)); renderGallery(); });
-  es.addEventListener("sstvstat", e => { sstvStat = JSON.parse(e.data); renderSstvStat(); });
+  es.addEventListener("sstvstat", e => { sstvStat = JSON.parse(e.data); renderSstvStat(); drawOverlay(); });
   es.addEventListener("tx", e => { txInfo = JSON.parse(e.data); renderTx(); });
   es.addEventListener("tr", e => {
     const t = JSON.parse(e.data); if (!t.replace) { trs.push(t); if (trs.length > 300) trs.shift(); renderTr(); } onTranscript(t);

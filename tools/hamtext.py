@@ -3,17 +3,28 @@ import functools
 import os
 import re
 
-# Whisper takes this as the text before the audio, so it prefers these words and spellings
-PROMPT = ("CQ contest, CQ contest, this is Lima Zulu Nine Whiskey. QRZ? Five nine, one four. "
-          "Roger, thank you, seven three. Alpha Bravo Charlie Delta Echo Foxtrot Golf Hotel India "
-          "Juliett Kilo Lima Mike November Oscar Papa Quebec Romeo Sierra Tango Uniform Victor "
-          "Whiskey X-ray Yankee Zulu.")
+# Whisper takes this as the text before the audio, so it prefers these words and spellings.
+# The words are the most common ones in amateur radio voice traffic and in contests:
+# CQ, QRZ, the exchange (five nine and a zone or a number), the NATO alphabet, and the
+# place names that contest operators often use for letters.
+PROMPT = ("CQ contest, CQ contest, this is Lima Zulu Nine Whiskey, Lima Zulu Nine Whiskey, contest. "
+          "QRZ? Mike Six Charlie, Mexico Six Canada. Tango Mike Five Charlie, you are five nine one four. "
+          "Thank you, five nine twenty, QSL. Again please? Roger, copy, good luck, seven three. "
+          "Alfa or Alpha, Bravo, Charlie, Delta, Echo, Foxtrot, Golf, Hotel, India, Juliett or Juliet, Kilo, Lima, "
+          "Mike, November, Oscar, Papa, Quebec, Romeo, Sierra, Tango, Uniform, Victor, Whiskey or Whisky, "
+          "X-ray or Xray, Yankee, Zulu. America, Canada, "
+          "Denmark, England, Germany, Italy, Japan, Kilowatt, London, Mexico, Norway, Portugal, Radio, "
+          "Santiago, Sugar, Tokyo, United, Washington.")
 
 NATO = {"alpha": "A", "alfa": "A", "bravo": "B", "charlie": "C", "delta": "D", "echo": "E", "foxtrot": "F",
         "fox": "F", "golf": "G", "hotel": "H", "india": "I", "juliet": "J", "juliett": "J", "kilo": "K",
         "lima": "L", "lema": "L", "mike": "M", "november": "N", "oscar": "O", "papa": "P", "quebec": "Q",
         "romeo": "R", "sierra": "S", "tango": "T", "uniform": "U", "victor": "V", "whiskey": "W",
-        "whisky": "W", "xray": "X", "x-ray": "X", "yankee": "Y", "zulu": "Z"}
+        "whisky": "W", "xray": "X", "x-ray": "X", "yankee": "Y", "zulu": "Z",
+        # the wrong spellings that Whisper often writes for NATO words in radio audio
+        "eco": "E", "ecco": "E", "gulf": "G", "juliette": "J", "mic": "M", "novembre": "N", "fapa": "P",
+        "dango": "T", "tengo": "T", "zango": "T", "tongo": "T", "stango": "T", "sango": "T", "etango": "T",
+        "yanky": "Y", "yenkee": "Y", "ienkee": "Y"}
 DIGITS = {"zero": "0", "one": "1", "two": "2", "three": "3", "four": "4", "five": "5", "six": "6",
           "seven": "7", "eight": "8", "nine": "9", "niner": "9"}
 # ITU style: prefix (1-2 letters, or digit+letter, or letter+digit), one digit, suffix of 1-4 letters
@@ -227,3 +238,22 @@ _NATO_WORD = {v: k for k, v in NATO.items() if k not in ("alfa", "juliet", "whis
 
 def _nato_word(letter):
     return _NATO_WORD.get(letter, letter)
+
+
+_DIGIT_WORD = {v: k for k, v in DIGITS.items() if k != "niner"}
+
+
+def spell(call):
+    """A callsign in NATO words: LZ9W -> Lima Zulu Nine Whiskey."""
+    return " ".join(_DIGIT_WORD[c].capitalize() if c.isdigit() else _nato_word(c).capitalize() for c in call)
+
+
+def prompt(calls=()):
+    """The prompt, with the callsigns heard on the frequency at the end.
+
+    Whisper keeps the end of a long prompt, so the callsigns stay in it.
+    """
+    calls = list(calls)[:6]   # the prompt stays below the limit of about 224 tokens
+    if not calls:
+        return PROMPT
+    return PROMPT + " Stations on the frequency: " + ", ".join(spell(c) for c in calls) + "."
